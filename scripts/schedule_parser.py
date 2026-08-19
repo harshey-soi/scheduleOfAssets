@@ -328,6 +328,44 @@ def find_last_numeric_run(words: List[Word]) -> Optional[Tuple[int, int]]:
         # Ignore year ranges
         if re.fullmatch(r"\d{4}-\d{4}", text):
             continue
+        # Ignore standalone 4-digit year tokens (e.g. '2022') which are
+        # commonly part of descriptive parentheticals and not monetary
+        # values. However, do NOT ignore them when they look like a
+        # monetary value (for example when preceded by a "$" token or
+        # when they are tightly adjacent to other numeric tokens). This
+        # reduces false-positives (accepting a year as the row value)
+        # while preserving real $YYYY amounts when context indicates
+        # they're values.
+        if re.fullmatch(r"\d{4}", text):
+            try:
+                y = int(text)
+                if 1900 <= y <= 2099:
+                    # Check nearby context before skipping the 4-digit token.
+                    # Accept it (do not skip) if it's clearly part of a value:
+                    # - preceded by a dollar-sign token, or
+                    # - adjacent to another numeric token with only a small gap.
+                    prev_ok = False
+                    if i > 0:
+                        prev_text = words[i - 1].text.strip()
+                        if prev_text in ("$",):
+                            prev_ok = True
+                        elif is_numeric_value(prev_text):
+                            gap = words[i].x0 - words[i - 1].x1
+                            if gap < _MIN_MAJOR_GAP_PT:
+                                prev_ok = True
+
+                    next_ok = False
+                    if i + 1 < len(words):
+                        next_text = words[i + 1].text.strip()
+                        if is_numeric_value(next_text):
+                            gap = words[i + 1].x0 - words[i].x1
+                            if gap < _MIN_MAJOR_GAP_PT:
+                                next_ok = True
+
+                    if not prev_ok and not next_ok:
+                        continue
+            except Exception:
+                pass
         if re.fullmatch(r"\(\d+\)", text.replace(" ", "")):
             continue
         if is_numeric_value(words[i].text):
@@ -597,13 +635,180 @@ def parse_schedule_h_page(raw_words):
         if row_words:
             runs = find_numeric_runs(row_words)
             if runs:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("NUMERIC RUNS FOUND: %s", runs)
+                    for r in runs:
+                        s, e = r
+                        run_text = " ".join(w.text for w in row_words[s : e + 1])
+                        meanx = statistics.mean([w.xc for w in row_words[s : e + 1]])
+                        gap_before = None
+                        if s > 0:
+                            gap_before = row_words[s].x0 - row_words[s - 1].x1
+                        has_comma = any(
+                            ("," in w.text) for w in row_words[s : e + 1]
+                        )
+                        has_dollar = any(w.text.strip().startswith("$") for w in row_words[s : e + 1])
+                        in_column = (
+                            numeric_x_median is not None
+                            and abs(meanx - numeric_x_median) <= _NUMERIC_COLUMN_TOLERANCE_PT
+                        )
+                        try:
+                            embedded_flag = is_run_embedded(r)
+                        except Exception:
+                            embedded_flag = None
+                        logger.debug(
+                            "CANDIDATE %s | text='%s' | meanx=%.1f | gap_before=%s | in_column=%s | comma=%s | dollar=%s | embedded=%s",
+                            r,
+                            run_text,
+                            meanx,
+                            None if gap_before is None else round(gap_before, 1),
+                            in_column,
+                            has_comma,
+                            has_dollar,
+                            embedded_flag,
+                        )
                 # Pick the run whose right edge is farthest to the right
                 # (more robust than mean x when widths differ).
                 def run_right_x(r):
                     s, e = r
                     return max(w.x1 for w in row_words[s : e + 1])
+                # Mixed-priority selection:
+                # 1) Runs containing a comma or a leading '$' (likely monetary)
+                # 2) Runs in the page-level numeric column (near median)
+                # 3) Runs separated by a major gap from preceding text
+                # 4) Fallback to the rightmost run
+                def run_has_comma_or_dollar(r):
+                    s, e = r
+                    for w in row_words[s : e + 1]:
+                        t = w.text.strip()
+                        if "," in t or t.startswith("$"):
+                            return True
+                    return False
 
-                best = max(runs, key=run_right_x)
+                runs_comma = [r for r in runs if run_has_comma_or_dollar(r)]
+
+                chosen = None
+                # Prefer comma/$ runs that are also in the column or separated
+                if runs_comma:
+                    runs_pref = []
+                    for r in runs_comma:
+                        s, e = r
+                        meanx = statistics.mean([w.xc for w in row_words[s : e + 1]])
+                        in_column = numeric_x_median is not None and abs(meanx - numeric_x_median) <= _NUMERIC_COLUMN_TOLERANCE_PT
+                        gap_before = row_words[s].x0 - row_words[s - 1].x1 if s > 0 else float('inf')
+                        separated = gap_before >= _MIN_MAJOR_GAP_PT
+                        if in_column or separated:
+                            runs_pref.append(r)
+                    if runs_pref:
+                        chosen = max(runs_pref, key=run_right_x)
+                    else:
+                        chosen = max(runs_comma, key=run_right_x)
+
+                # If none chosen yet, prefer runs in numeric column
+                if chosen is None and numeric_x_median is not None:
+                    runs_in_column = []
+                    for r in runs:
+                        s, e = r
+                        coords = [w.xc for w in row_words[s : e + 1]]
+                        if coords and abs(statistics.mean(coords) - numeric_x_median) <= _NUMERIC_COLUMN_TOLERANCE_PT:
+                            runs_in_column.append(r)
+                    if runs_in_column:
+                        # prefer ones separated by a major gap
+                        runs_sep = []
+                        relax_tolerance = _NUMERIC_COLUMN_TOLERANCE_PT * 5
+                        for r in runs_in_column:
+                            s, e = r
+                            gap_before = row_words[s].x0 - row_words[s - 1].x1 if s > 0 else float('inf')
+                            # require the run to also be reasonably close to the
+                            # numeric column median when numeric_x_median is set;
+                            # this prevents left-of-column runs (like '500' in
+                            # '500 Index Fund') from being treated as separated
+                            # numeric columns.
+                            meanx = statistics.mean([w.xc for w in row_words[s : e + 1]])
+                            if numeric_x_median is not None and abs(meanx - numeric_x_median) > relax_tolerance:
+                                continue
+                            if gap_before >= _MIN_MAJOR_GAP_PT:
+                                runs_sep.append(r)
+                        if runs_sep:
+                            chosen = max(runs_sep, key=run_right_x)
+                        else:
+                            chosen = max(runs_in_column, key=run_right_x)
+
+                # If still none, prefer runs separated by major gap
+                if chosen is None:
+                    runs_separated = []
+                    relax_tolerance = _NUMERIC_COLUMN_TOLERANCE_PT * 5
+                    for r in runs:
+                        s, e = r
+                        if s > 0:
+                            gap_before = row_words[s].x0 - row_words[s - 1].x1
+                            meanx = statistics.mean([w.xc for w in row_words[s : e + 1]])
+                            if numeric_x_median is not None and abs(meanx - numeric_x_median) > relax_tolerance:
+                                # skip separated runs that are far left of the
+                                # numeric column median (likely part of identity)
+                                continue
+                            if gap_before >= _MIN_MAJOR_GAP_PT:
+                                runs_separated.append(r)
+                    if runs_separated:
+                        chosen = max(runs_separated, key=run_right_x)
+                    else:
+                        chosen = max(runs, key=run_right_x)
+
+                best = chosen
+
+                # Post-filter: avoid selecting numeric runs that are clearly
+                # embedded in the identity/description text (e.g. fund-year
+                # tokens like "2060 TD"). A run is considered embedded if
+                # it is tightly adjacent to alphabetic tokens on either side
+                # (small gap) which indicates it's part of the name, not a
+                # monetary column. If the chosen run appears embedded and
+                # there is an alternative run that is not embedded, prefer
+                # that alternative.
+                def is_alpha_word(w):
+                    return bool(re.search(r"[A-Za-z]", w.text))
+
+                def is_run_embedded(r):
+                    s, e = r
+                    # gap to previous word
+                    if s > 0:
+                        gap_before = row_words[s].x0 - row_words[s - 1].x1
+                        if gap_before < _MIN_MAJOR_GAP_PT and is_alpha_word(row_words[s - 1]):
+                            return True
+                    # gap to next word
+                    if e + 1 < len(row_words):
+                        gap_after = row_words[e + 1].x0 - row_words[e].x1
+                        # Short alphabetic suffixes like 'TD' commonly follow
+                        # fund-year tokens (e.g. '2060 TD') and indicate the
+                        # numeric token is part of the identity even if the
+                        # spacing is large. Treat short alpha-only tokens
+                        # (1-3 letters) after the run as embedded context.
+                        next_word = row_words[e + 1]
+                        if (gap_after < _MIN_MAJOR_GAP_PT and is_alpha_word(next_word)):
+                            return True
+                        next_text = next_word.text.strip()
+                        if re.fullmatch(r"[A-Za-z]{1,3}\.?", next_text):
+                            return True
+                    return False
+
+                if best is not None and is_run_embedded(best):
+                    # find an alternative non-embedded run among the previously
+                    # considered candidate sets in priority order
+                    alt = None
+                    candidate_lists = [
+                        runs_comma if 'runs_comma' in locals() else [],
+                        (runs_in_column if 'runs_in_column' in locals() else []),
+                        (runs_separated if 'runs_separated' in locals() else []),
+                        runs,
+                    ]
+                    for clist in candidate_lists:
+                        for r in sorted(clist, key=run_right_x, reverse=True):
+                            if not is_run_embedded(r):
+                                alt = r
+                                break
+                        if alt is not None:
+                            break
+                    if alt is not None:
+                        best = alt
                 value_hit = best
             else:
                 value_hit = None
@@ -625,6 +830,107 @@ def parse_schedule_h_page(raw_words):
                     )
                     value_hit = (i, i)
                     break
+
+        # Heuristic: if the chosen value run is a short 4-digit token with
+        # no comma and no leading '$', and it appears embedded in the
+        # identity (or is followed by a short alphabetic suffix like
+        # 'TD'), then treat it as NOT a value so that a following
+        # numeric-only line (e.g. '41,219') can be used as the real value.
+        if value_hit is not None:
+            s_val, e_val = value_hit
+            run_words = row_words[s_val : e_val + 1]
+            run_text = "".join(w.text for w in run_words)
+            digits = re.sub(r"\D", "", run_text)
+            has_comma_or_dollar = any(("," in w.text or w.text.strip().startswith("$")) for w in run_words)
+            # small 4-digit token without monetary cues
+            if len(digits) == 4 and not has_comma_or_dollar:
+                # check adjacency to alpha words (embedded) or short alpha suffix
+                embedded = False
+                if s_val > 0:
+                    gap_before = row_words[s_val].x0 - row_words[s_val - 1].x1
+                    if gap_before < _MIN_MAJOR_GAP_PT and re.search(r"[A-Za-z]", row_words[s_val - 1].text):
+                        embedded = True
+                if e_val + 1 < len(row_words):
+                    gap_after = row_words[e_val + 1].x0 - row_words[e_val].x1
+                    next_text = row_words[e_val + 1].text.strip()
+                    if gap_after < _MIN_MAJOR_GAP_PT and re.search(r"[A-Za-z]", row_words[e_val + 1].text):
+                        embedded = True
+                    if re.fullmatch(r"[A-Za-z]{1,3}\.?", next_text):
+                        embedded = True
+                if embedded:
+                    value_hit = None
+                # Allow 4-digit numeric tokens when they look like a value:
+                # - preceded by a dollar-sign token, or
+                # - positioned near the page's detected numeric column median.
+                if len(digits) == 4:
+                    # Use the run's start index (`s_val`) rather than a
+                    # loop variable that may not be defined in this scope.
+                    prev_text = row_words[s_val - 1].text.strip() if s_val > 0 else ""
+                    is_prev_dollar = prev_text in ("$",)
+                    is_in_numeric_column = False
+                    if numeric_x_median is not None:
+                        try:
+                            if abs(row_words[s_val].xc - numeric_x_median) < _NUMERIC_COLUMN_TOLERANCE_PT:
+                                is_in_numeric_column = True
+                        except Exception:
+                            is_in_numeric_column = False
+
+                    if is_prev_dollar or is_in_numeric_column:
+                        logger.info(
+                            "FALLBACK 4-DIGIT TOKEN -> using token '%s' as value on line: %s",
+                            run_text,
+                            line_text(row_words),
+                        )
+                        value_hit = (s_val, e_val)
+
+        # Additional heuristic: if the chosen run is a short numeric token
+        # (no comma, no leading '$', digits <= 4) and the *next* visual
+        # row is numeric-only (a separate line containing the real value),
+        # prefer the next row instead of this short token which is likely
+        # part of the identity (e.g. '500' in '500 Index Fund'). Clear
+        # value_hit so the following numeric-only row will be treated as
+        # the value for the currently-open identity.
+        if value_hit is not None:
+            try:
+                s_val, e_val = value_hit
+                run_words = row_words[s_val : e_val + 1]
+                run_text = "".join(w.text for w in run_words)
+                digits = re.sub(r"\D", "", run_text)
+                has_comma_or_dollar = any(("," in w.text or w.text.strip().startswith("$")) for w in run_words)
+                # Only treat short runs of exactly 4 digits as potential
+                # embedded-year/fund tokens to reject; allow 1-3 digit
+                # numeric values to be considered valid monetary values.
+                if digits and len(digits) == 4 and not has_comma_or_dollar:
+                    if idx + 1 < len(body_lines) and numeric_x_median is not None:
+                        next_row = strip_leading_markers(body_lines[idx + 1])
+                        # Require the next row to be numeric-only and its
+                        # numeric run to sit in the page numeric column (to
+                        # avoid grabbing a distant grand-total/subtotal).
+                        if is_row_numeric_only(next_row):
+                            next_hit = find_last_numeric_run(next_row)
+                            if next_hit is not None:
+                                ns, ne = next_hit
+                                try:
+                                    meanx_next = statistics.mean([w.xc for w in next_row[ns:ne+1]])
+                                except Exception:
+                                    meanx_next = None
+                                # vertical proximity: next row should be close
+                                # to current line (not several paragraphs below).
+                                try:
+                                    y_gap = next_row[0].yc - row_words[-1].yc
+                                except Exception:
+                                    y_gap = None
+                                close_vertically = (y_gap is None) or (y_gap <= ROW_Y_TOLERANCE * 2)
+                                in_numeric_column = meanx_next is not None and abs(meanx_next - numeric_x_median) <= _NUMERIC_COLUMN_TOLERANCE_PT
+                                if in_numeric_column and close_vertically:
+                                    logger.info(
+                                        "PREFER NEXT ROW VALUE -> rejecting short run '%s' in favor of next numeric-only row: %s",
+                                        run_text,
+                                        line_text(next_row),
+                                    )
+                                    value_hit = None
+            except Exception:
+                pass
 
         # Quick guard: handle cases where the row contains only one or more
         # isolated dollar-sign tokens followed by the numeric value (e.g.
@@ -804,10 +1110,14 @@ def parse_schedule_h_page(raw_words):
                 continue
             
             # Participant-loan descriptive lines
-            if (
-                "%" in identity_text
-                or re.search(r"\d{4}-\d{4}", identity_text)
-            ):
+            # Skip obvious year-range headers always (e.g. "2019-2020").
+            if re.search(r"\d{4}-\d{4}", identity_text):
+                continue
+            # Allow percent signs within identity when the row contains
+            # a numeric value (e.g. "85% Fund ... 70,916"). Only skip
+            # percent-containing identities when there's no detected
+            # numeric value on the same row.
+            if "%" in identity_text and value_hit is None:
                 continue
 
             logger.info(
