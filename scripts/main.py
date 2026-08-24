@@ -111,14 +111,35 @@ def process_input_file(pdf_path: str) -> bool:
             raise ValueError("No data extracted from any Schedule H page.")
 
         os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-        output_filename = f"{sanitize_filename(result.plan_name)}.xlsx"
+        # Use the input PDF filename (without extension) for the output
+        # workbook name rather than the extracted plan name.
+        input_base = os.path.splitext(os.path.basename(pdf_path))[0]
+        output_filename = f"{sanitize_filename(input_base)}.xlsx"
         output_path = _unique_output_path(OUTPUT_FOLDER, output_filename)
 
         write_workbook(result.pages, output_path)
         logger.info("Success -> %s", output_path)
         return True
     except Exception as exc:  # noqa: BLE001 - per-file failure boundary
+        import traceback
+        tb = traceback.format_exc()
         logger.error("Failed to process %s: %s", pdf_path, exc)
+
+        # Instead of moving the PDF to a failed folder, create an Excel
+        # workbook with the same base name that contains the exception
+        # traceback so users can inspect why processing failed.
+        try:
+            os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+            input_base = os.path.splitext(os.path.basename(pdf_path))[0]
+            output_filename = f"{sanitize_filename(input_base)}.xlsx"
+            output_path = _unique_output_path(OUTPUT_FOLDER, output_filename)
+            from excel_writer import write_error_workbook
+
+            write_error_workbook(output_path, tb)
+            logger.info("Wrote error workbook -> %s", output_path)
+        except Exception as write_exc:
+            logger.error("Failed to write error workbook for %s: %s", pdf_path, write_exc)
+
         return False
 
 
@@ -160,7 +181,7 @@ def run() -> None:
         if process_input_file(pdf_path):
             successes += 1
         else:
-            _move_to_failed(pdf_path)
+            logger.info("Left failed input in place: %s", pdf_path)
 
     logger.info("Done. %d/%d file(s) processed successfully.", successes, len(pdf_paths))
 

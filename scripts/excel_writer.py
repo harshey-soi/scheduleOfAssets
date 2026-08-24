@@ -85,3 +85,17 @@ def write_workbook(pages: List[SchedulePageResult], output_path: str) -> None:
 
     workbook.save(output_path)
     logger.info("Workbook written: %s", output_path)
+
+
+def write_error_workbook(output_path: str, error_text: str) -> None:
+    """Write a single-sheet workbook containing the error text for failed PDFs."""
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Error"
+    # Write the error text into A1 and enable wrap
+    cell = worksheet.cell(row=1, column=1, value=error_text)
+    cell.alignment = Alignment(wrap_text=True)
+    # widen the column so the text is readable
+    worksheet.column_dimensions["A"].width = 120
+    workbook.save(output_path)
+    logger.info("Error workbook written: %s", output_path)
