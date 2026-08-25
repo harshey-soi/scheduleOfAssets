@@ -33,7 +33,12 @@ _FOUR_COL_WIDTHS = [30, 45, 16, 20]
 
 
 def _write_page_sheet(worksheet: Worksheet, page: SchedulePageResult) -> None:
-    headers = _FOUR_COL_HEADERS if page.has_cost_column else _THREE_COL_HEADERS
+    # Use 'Investment' as the identity header for tickered layouts
+    identity_label = "Investment" if (page.source or "").upper().startswith("TICKERED") else "Identity"
+    if page.has_cost_column:
+        headers = [_FOUR_COL_HEADERS[0].replace("Identity", identity_label)] + _FOUR_COL_HEADERS[1:]
+    else:
+        headers = [_THREE_COL_HEADERS[0].replace("Identity", identity_label)] + _THREE_COL_HEADERS[1:]
     widths = _FOUR_COL_WIDTHS if page.has_cost_column else _THREE_COL_WIDTHS
     numeric_column_indices = {len(headers) - 1, len(headers)} if page.has_cost_column else {len(headers)}
 

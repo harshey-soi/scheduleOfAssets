@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import os
 import re
+import pytesseract
+import shutil
 
 # --------------------------------------------------------------------------
 # Folder layout
@@ -27,6 +29,59 @@ QUICK_OCR_ZOOM = 150 / 72   # cheap pass, used only to *detect* Schedule H pages
 OCR_ZOOM = 300 / 72         # thorough pass, used to actually *extract* words
 
 OCR_TESSERACT_CONFIG = r"--oem 3 --psm 6 -c preserve_interword_spaces=1"
+
+# Optional: allow users to specify the full tesseract binary path via
+# several possible environment variable names (some teams use
+# nonstandard names like `tesseract_prefix`). Accept either a full
+# path to the exe or a directory path containing `tesseract.exe`.
+_env_keys = [
+    "TESSERACT_CMD",
+    "TESSERACT_PATH",
+    "TESSERACT_PREFIX",
+    "tesseract_prefix",
+    "TESSERACT",
+]
+TESSERACT_CMD = None
+_used_env_key = None
+for _k in _env_keys:
+    _v = os.environ.get(_k)
+    if not _v:
+        continue
+    # strip quotes and whitespace that some shells/IDEs include
+    _v = _v.strip().strip('"').strip("'")
+    # if user provided a directory, append the exe name
+    if os.path.isdir(_v):
+        _candidate = os.path.join(_v, "tesseract.exe")
+    else:
+        _candidate = _v
+    if os.path.exists(_candidate):
+        TESSERACT_CMD = _candidate
+        _used_env_key = _k
+        break
+
+if not TESSERACT_CMD:
+    _win_default = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    if os.path.exists(_win_default):
+        TESSERACT_CMD = _win_default
+
+if TESSERACT_CMD:
+    try:
+        pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+    except Exception:
+        # Fail silently here; callers will raise a clear error when OCR is attempted
+        pass
+
+# Diagnostic: print resolved values so users see which tesseract binary
+# the process will attempt to use (helps debug PATH vs env-var issues).
+try:
+    _which = shutil.which("tesseract")
+except Exception:
+    _which = None
+
+if TESSERACT_CMD:
+    print(f"[config] TESSERACT_CMD={TESSERACT_CMD!r}, exists={os.path.exists(TESSERACT_CMD)}, shutil.which('tesseract')={_which!r}")
+else:
+    print(f"[config] TESSERACT_CMD not set, shutil.which('tesseract')={_which!r}")
 
 # A page is considered "not searchable" (i.e. requires OCR) once its native
 # extractable text falls below this many characters.
@@ -50,6 +105,11 @@ SCHEDULE_H_HEADING_RE = re.compile(
     r"|schedule\s*h\s*\(?\s*line\s*4i\s*\)?",
     re.IGNORECASE,
 )
+
+# Broader match used as a fallback for headings that simply say
+# "Schedule of Assets" (many filings use this shorter heading).
+# NOTE: removal: 'Schedule of Assets' fallback regex reverted to avoid
+# overbroad page-matching. Use `SCHEDULE_H_HEADING_RE` for page detection.
 
 # A different lettered schedule heading (e.g. "Schedule G") signals that
 # Schedule H content has ended.

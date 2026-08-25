@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import time
 from typing import List
 
 from config import FAILED_FOLDER, INPUT_FOLDER, OUTPUT_FOLDER
@@ -27,6 +28,11 @@ import tickered
 import grid_extractor
 from schedule_parser import parse_schedule_h_page
 from utils import configure_logging, sanitize_filename
+import pytesseract
+
+pytesseract.pytesseract.tesseract_cmd = (
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +125,65 @@ def process_input_file(pdf_path: str) -> bool:
 
         write_workbook(result.pages, output_path)
         logger.info("Success -> %s", output_path)
+        # Delete the input PDF now that processing succeeded. If deletion
+        # fails due to transient locks (Antivirus, Explorer preview), retry
+        # a few times with exponential backoff. If still failing, move the
+        # file to the failed folder as an archive fallback.
+        delete_attempts = 5
+        delay = 0.5
+        deleted = False
+        for attempt in range(1, delete_attempts + 1):
+            try:
+                # Diagnostic: log file existence and attributes before remove
+                try:
+                    exists = os.path.exists(pdf_path)
+                    isfile = os.path.isfile(pdf_path)
+                    size = os.path.getsize(pdf_path) if exists else -1
+                    readable = os.access(pdf_path, os.R_OK)
+                    writable = os.access(pdf_path, os.W_OK)
+                    logger.debug(
+                        "Delete attempt %d: exists=%s isfile=%s size=%d readable=%s writable=%s",
+                        attempt,
+                        exists,
+                        isfile,
+                        size,
+                        readable,
+                        writable,
+                    )
+                except Exception as _log_exc:
+                    logger.debug("Failed to stat file before delete: %s", _log_exc)
+
+                os.remove(pdf_path)
+                logger.info("Deleted input file: %s", pdf_path)
+                deleted = True
+                break
+            except PermissionError as exc:
+                logger.warning(
+                    "Permission denied deleting '%s' (attempt %d/%d): %s",
+                    pdf_path,
+                    attempt,
+                    delete_attempts,
+                    exc,
+                )
+                # Try clearing read-only bit on Windows as a remediation step
+                try:
+                    os.chmod(pdf_path, 0o666)
+                    logger.info("Cleared read-only bit for %s", pdf_path)
+                except Exception as chmod_exc:
+                    logger.debug("Failed to chmod %s: %s", pdf_path, chmod_exc)
+
+                time.sleep(delay)
+                delay *= 2
+            except Exception as exc:
+                logger.error("Failed to delete input file %s: %s", pdf_path, exc)
+                break
+
+        if not deleted:
+            try:
+                logger.info("Attempting to archive locked input to failed folder: %s", pdf_path)
+                _move_to_failed(pdf_path)
+            except Exception as exc:
+                logger.error("Failed to archive locked input %s: %s", pdf_path, exc)
         return True
     except Exception as exc:  # noqa: BLE001 - per-file failure boundary
         import traceback

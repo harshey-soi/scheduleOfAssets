@@ -125,6 +125,10 @@ def find_schedule_h_pages(doc):
     return pages
 
 
+# NOTE: 'Schedule of Assets' fallback detection removed — reverted to
+# rely solely on `SCHEDULE_H_HEADING_RE` for Schedule H page discovery.
+
+
 def _rotation_readability_score(page: "fitz.Page", rotation: int) -> int:
     """Score how "readable" a page looks at a candidate rotation.
 

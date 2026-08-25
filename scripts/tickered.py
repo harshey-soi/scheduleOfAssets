@@ -178,7 +178,7 @@ def _extract_tickered_rows_from_text(page_text):
             in_participant_loans_section = True
         if any(token in lower for token in ["maturity date", "interest rate", "cost of assets", "current value"]):
             continue
-        if lower.startswith("schedule h") or "schedule of assets" in lower:
+        if lower.startswith("schedule h"):
             continue
         if lower.startswith("page ") or re.fullmatch(r"\d+", lower):
             continue
@@ -212,7 +212,7 @@ def extract_tickered_rows_from_page(doc, page_index):
 
     searchable_rows = _extract_tickered_rows_from_text(page_text)
     if searchable_rows:
-        return searchable_rows, "TEXT"
+        return searchable_rows, "TICKERED_TEXT"
 
     try:
         image = render_page_to_image(page, zoom=300 / 72)
@@ -236,10 +236,10 @@ def extract_tickered_rows_from_page(doc, page_index):
 
         if best_rows and best_label != "original":
             logger.info("Used %s orientation for tickered extraction on page %d.", best_label, page_index + 1)
-        return best_rows, "OCR"
+        return best_rows, "TICKERED_OCR"
     except Exception as error:
         logger.warning("Tickered OCR failed on page %d: %s", page_index + 1, error)
-        return [], "OCR"
+        return [], "TICKERED_OCR"
 
 
 def process_tickered_pdf(pdf_path: str) -> ExtractionResult:
