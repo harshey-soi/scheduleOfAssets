@@ -286,10 +286,24 @@ def _is_tickered_page(text: str) -> bool:
         "investment option",
         "maturity date",
         "interest rate",
-        "cost of assets",
+      #  "cost of assets",
         "current value",
     ]
-    return all(token in top_text for token in required)
+    present = [token for token in required if token in top_text]
+
+    # Accept when the clear pair of headers is present (most robust):
+    if "investment option" in top_text and "current value" in top_text:
+        logger.debug("Tickered check: detected required pair tokens: %s", present)
+        return True
+
+    # Otherwise accept if a majority of tokens appear (tolerant fallback).
+    if len(present) >= 3:
+        logger.debug("Tickered check: majority tokens present: %s", present)
+        return True
+
+    missing = [token for token in required if token not in top_text]
+    logger.debug("Tickered check: insufficient tokens present=%s missing=%s", present, missing)
+    return False
 
 
 def is_tickered_document(doc: "fitz.Document", pages_to_check: int = 8) -> bool:
@@ -319,3 +333,15 @@ def is_tickered_among_pages(doc: "fitz.Document", page_indices: list[int]) -> bo
         if _is_tickered_page(text):
             return True
     return False
+
+
+def get_tickered_page_indices(doc: "fitz.Document", page_indices: list[int]) -> list[int]:
+    """Return the subset of page indices that appear to use tickered layout."""
+    tickered_pages: list[int] = []
+    for i in page_indices:
+        if i < 0 or i >= len(doc):
+            continue
+        text = _page_text_or_quick_ocr(doc, i)
+        if _is_tickered_page(text):
+            tickered_pages.append(i)
+    return tickered_pages

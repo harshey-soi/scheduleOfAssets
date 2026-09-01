@@ -437,17 +437,23 @@ def clean_value_text(start_index: int, end_index: int, words: List[Word]) -> str
 def parse_schedule_h_page(raw_words):
     words = normalize_words(raw_words)
 
-    # Cut off the bottom 5% of the page to avoid footer text.
-    if words:
-        max_y = max(w.y1 for w in words)
-        cutoff_y = max_y * 0.95
-        words = [w for w in words if w.y0 < cutoff_y]
-
+    # NOTE: We intentionally do NOT apply a blind "bottom N% of page"
+    # cutoff here. Computing max_y from the words themselves means that
+    # on densely packed tables (where the last row sits right at the
+    # bottom margin), that last row's own y-position IS the max_y, so a
+    # percentage-based cutoff silently strips its words before line
+    # grouping even happens -- before any debug logging can show it.
+    # Real footer/legend text is instead removed below, after line
+    # grouping, using pattern-based detection (`is_bottom_junk_line`),
+    # which is safe because it inspects actual line content rather than
+    # a blind vertical percentage.
     lines = group_lines(words)
 
     start_idx = detect_header(lines)
     if start_idx is None:
         return [], False
+
+    # Original behavior: proceed without logging header context
 
     body_lines = lines[start_idx + 1 :]
 
@@ -596,13 +602,6 @@ def parse_schedule_h_page(raw_words):
         # (e.g. "Participant loans", "Participants Loans", "Participant Loan(s)").
         if re.search(r"\bparticipant(?:s)?\s+loans?\b", lower):
             value_hit = find_last_numeric_run(row_words)
-            logger.info(
-                "DEBUG | text='%s' | value_hit=%s | row_open=%s | current_identity=%s",
-                text,
-                value_hit,
-                row_open,
-                current_identity,
-            )
             if row_open and current_identity:
                 rows.append(ScheduleRow(identity=current_identity, description="", cost="", current_value=""))
             current_identity = "Participant loans"
@@ -1120,11 +1119,6 @@ def parse_schedule_h_page(raw_words):
             if "%" in identity_text and value_hit is None:
                 continue
 
-            logger.info(
-                "STATE CHECK | row_open=%s | current_identity=%s",
-                row_open,
-                current_identity,
-            )
             # Heuristic: if the previous visual line (one above in the
             # PDF) looks like a short identity with no numeric value, and
             # this current line contains a value, then the previous line
@@ -1189,26 +1183,10 @@ def parse_schedule_h_page(raw_words):
             )
 
             row_open = True
-            logger.info(
-                "OPENING ROW -> %s",
-                current_identity,
-            )
-
-            logger.info(
-                "ROW DEBUG | identity=%s | value_hit=%s | full_row=%s",
-                identity_text,
-                value_hit,
-                text,
-            )
             if value_hit is not None:
 
                 start_idx, end_idx = value_hit
                 value = clean_value_text(start_idx, end_idx, row_words)
-                logger.info(
-                    "CLOSING ROW -> identity=%s value=%s",
-                    current_identity,
-                    value,
-                )
                 rows.append(
                     ScheduleRow(
                         identity=current_identity,

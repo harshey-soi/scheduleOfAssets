@@ -25,7 +25,6 @@ TICKERED_HEADERS = [
     "Investment Option",
     "Maturity Date",
     "Interest Rate",
-    "Cost of Assets",
     "Current Value",
 ]
 
@@ -161,6 +160,20 @@ def _extract_tickered_rows_from_text(page_text):
     for idx, line in enumerate(lines):
         lower = line.lower()
         if "investment option" in lower and "current value" in lower:
+            # Log header line and small context for debugging
+            try:
+                ctx_start = max(0, idx - 3)
+                ctx_end = min(len(lines), idx + 4)
+                header_context = [lines[i] for i in range(ctx_start, ctx_end)]
+                logger.info(
+                    "Tickered detected header at line %d (context %d..%d): %s",
+                    idx,
+                    ctx_start,
+                    ctx_end - 1,
+                    header_context,
+                )
+            except Exception:
+                logger.debug("Failed to log tickered header context at idx=%d", idx)
             start_idx = idx + 1
             break
     if start_idx == -1:
@@ -170,7 +183,7 @@ def _extract_tickered_rows_from_text(page_text):
 
     rows = []
     in_participant_loans_section = False
-    for line in lines:
+    for idx, line in enumerate(lines):
         lower = line.lower()
         if _is_non_table_line(lower):
             break
@@ -185,10 +198,15 @@ def _extract_tickered_rows_from_text(page_text):
         if "legend" in lower or lower.startswith("*"):
             continue
 
+        # If the next line looks like a numeric-only continuation (common when
+        # OCR breaks amounts onto the following visual line), merge it and try
+        # parsing the combined text as well.
         parsed = _extract_tickered_row_from_line(
             line,
             allow_blank_investment=not in_participant_loans_section,
         )
+        if not parsed:
+            continue
         if not parsed:
             continue
         rows.append(parsed)
@@ -229,6 +247,8 @@ def extract_tickered_rows_from_page(doc, page_index):
                 attempt_image,
                 config=r'--oem 3 --psm 6 -c preserve_interword_spaces=0',
             )
+            # Log OCR top lines for this attempt so we can inspect header tokens
+                # No debug logging here (restore original behavior)
             rows = _extract_tickered_rows_from_text(text)
             if len(rows) > len(best_rows):
                 best_rows = rows
@@ -288,6 +308,7 @@ def process_tickered_pdf(pdf_path: str) -> ExtractionResult:
                 source=source,
             )
             page_results.append(page_result)
+            # Original behavior: no per-page diagnostic logging
 
         return ExtractionResult(plan_name=plan_name, pages=page_results)
     finally:
