@@ -75,10 +75,9 @@ _PAGE_NUMBER_RE = re.compile(
     re.IGNORECASE,
 )
 
-_FOOTNOTE_MARKER_RE = re.compile(r"^\(\d+\)$")
-
 
 def is_bottom_junk_line(line: List[Word]) -> bool:
+    """Return True for footer, legend, or page-number lines that are not data rows."""
     text = line_text(line).strip()
     lower = text.lower()
 
@@ -124,6 +123,7 @@ def is_bottom_junk_line(line: List[Word]) -> bool:
 
 
 def normalize_words(raw_words) -> List[Word]:
+    """Convert raw word tuples into `Word` objects and drop blanks."""
     return [Word(*w[:5]) for w in raw_words if w[4].strip()]
 
 
@@ -146,10 +146,12 @@ def group_lines(words: List[Word]) -> List[List[Word]]:
 
 
 def line_text(line: List[Word]) -> str:
+    """Rebuild a human-readable text line from a list of `Word` objects."""
     return join_text(w.text for w in line)
 
 
 def is_footer(text: str) -> bool:
+    """Return True when a text line matches known Schedule H footer boilerplate."""
     lower = text.lower()
 
     if any(p.search(text) for p in FOOTER_LINE_PATTERNS):
@@ -205,6 +207,7 @@ def is_row_numeric_only(words: List[Word]) -> bool:
 
 
 def detect_header(lines: List[List[Word]]) -> Optional[int]:
+    """Locate the first row that looks like the Schedule H column header."""
     header_idxs = []
 
     for i in range(min(25, len(lines))):
@@ -435,6 +438,7 @@ def clean_value_text(start_index: int, end_index: int, words: List[Word]) -> str
 
 
 def parse_schedule_h_page(raw_words):
+    """Parse one Schedule H page from word boxes into normalized row objects."""
     words = normalize_words(raw_words)
 
     # NOTE: We intentionally do NOT apply a blind "bottom N% of page"

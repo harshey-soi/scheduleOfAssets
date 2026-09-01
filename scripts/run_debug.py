@@ -9,6 +9,7 @@ from main import process_input_file
 
 
 def main(argv: list[str]) -> int:
+    """Run a single-file extraction with verbose logging for local debugging."""
     configure_logging(logging.DEBUG)
     if len(argv) >= 2:
         pdf_path = argv[1]
@@ -26,7 +27,7 @@ def main(argv: list[str]) -> int:
         ok = process_input_file(pdf_path)
         print("Done. Success:", ok)
         return 0 if ok else 1
-    except Exception as e:
+    except Exception:
         logging.exception("Error during debug run")
         return 3
 

@@ -21,15 +21,8 @@ from models import ExtractionResult, SchedulePageResult, ScheduleRow
 logger = logging.getLogger(__name__)
 
 
-TICKERED_HEADERS = [
-    "Investment Option",
-    "Maturity Date",
-    "Interest Rate",
-    "Current Value",
-]
-
-
 def _is_footer_line(lower_line):
+    """Return True when a line clearly belongs to footer or report boilerplate."""
     footer_keywords = [
         "accompanying report",
         "notes to the financial statements",
@@ -52,6 +45,7 @@ def _is_footer_line(lower_line):
 
 
 def _is_non_table_line(lower_line):
+    """Return True for lines that mark the end of tickered table content."""
     if _is_footer_line(lower_line):
         return True
     if "attachment" in lower_line or "attached" in lower_line:
@@ -64,6 +58,7 @@ def _is_non_table_line(lower_line):
 
 
 def _is_table_amount_token(token):
+    """Treat numeric tokens as values while rejecting likely year-only fields."""
     token = str(token or "").strip()
     if not token:
         return False
@@ -80,6 +75,7 @@ def _is_table_amount_token(token):
 
 
 def _split_footer(lines):
+    """Trim trailing footer text once footer boilerplate begins."""
     kept = []
     for line in lines:
         lower = line.lower()
@@ -90,6 +86,7 @@ def _split_footer(lines):
 
 
 def _extract_trailing_amount_tokens(text, max_count=2):
+    """Split a line into its leading text and up to two trailing amount tokens."""
     matches = list(re.finditer(r"\(?\$?\d[\d,]*(?:\.\d+)?\)?", text))
     if not matches:
         return text.strip(), []
@@ -110,6 +107,7 @@ def _extract_trailing_amount_tokens(text, max_count=2):
 
 
 def _extract_tickered_row_from_line(line, allow_blank_investment=False):
+    """Parse one tickered line into investment, maturity, rate, cost, and value."""
     left_text, amounts = _extract_trailing_amount_tokens(line, max_count=2)
     if not amounts:
         return None
@@ -153,6 +151,7 @@ def _extract_tickered_row_from_line(line, allow_blank_investment=False):
 
 
 def _extract_tickered_rows_from_text(page_text):
+    """Extract tickered rows from a page's text layer or OCR output."""
     lines = [line.strip() for line in page_text.splitlines() if line.strip()]
     lines = _split_footer(lines)
 
@@ -207,8 +206,6 @@ def _extract_tickered_rows_from_text(page_text):
         )
         if not parsed:
             continue
-        if not parsed:
-            continue
         rows.append(parsed)
 
     deduped = []
@@ -247,8 +244,6 @@ def extract_tickered_rows_from_page(doc, page_index):
                 attempt_image,
                 config=r'--oem 3 --psm 6 -c preserve_interword_spaces=0',
             )
-            # Log OCR top lines for this attempt so we can inspect header tokens
-                # No debug logging here (restore original behavior)
             rows = _extract_tickered_rows_from_text(text)
             if len(rows) > len(best_rows):
                 best_rows = rows
@@ -308,7 +303,6 @@ def process_tickered_pdf(pdf_path: str) -> ExtractionResult:
                 source=source,
             )
             page_results.append(page_result)
-            # Original behavior: no per-page diagnostic logging
 
         return ExtractionResult(plan_name=plan_name, pages=page_results)
     finally:

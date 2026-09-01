@@ -29,11 +29,6 @@ import tickered
 import grid_extractor
 from schedule_parser import parse_schedule_h_page
 from utils import configure_logging, sanitize_filename
-import pytesseract
-
-pytesseract.pytesseract.tesseract_cmd = (
-    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-)
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +78,7 @@ def process_pdf(pdf_path: str) -> ExtractionResult:
 
 
 def _unique_output_path(directory: str, filename: str) -> str:
+    """Return a unique file path by appending ' (n)' when needed."""
     base, ext = os.path.splitext(filename)
     candidate = os.path.join(directory, filename)
     counter = 1
@@ -93,7 +89,7 @@ def _unique_output_path(directory: str, filename: str) -> str:
 
 
 def process_input_file(pdf_path: str) -> bool:
-    """Process one PDF end-to-end; returns True on success."""
+    """Process one PDF end to end and write either data or an error workbook."""
     try:
         logger.info("Processing: %s", pdf_path)
         # Open the document briefly to decide which pipeline to use.
@@ -265,6 +261,7 @@ def process_input_file(pdf_path: str) -> bool:
 
 
 def _move_to_failed(path: str) -> None:
+    """Archive an input file to the failed folder without overwriting existing files."""
     os.makedirs(FAILED_FOLDER, exist_ok=True)
     dest_name = os.path.basename(path)
     dest_path = os.path.join(FAILED_FOLDER, dest_name)
@@ -281,6 +278,7 @@ def _move_to_failed(path: str) -> None:
 
 
 def run() -> None:
+    """Process every PDF currently waiting in the input folder."""
     configure_logging()
     os.makedirs(INPUT_FOLDER, exist_ok=True)
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)

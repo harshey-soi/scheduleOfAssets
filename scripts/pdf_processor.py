@@ -113,6 +113,7 @@ def extract_plan_name(doc: "fitz.Document") -> str:
 
 
 def find_schedule_h_pages(doc):
+    """Return page indices that look like Schedule H or Schedule of Assets pages."""
     pages = []
 
     for i in range(len(doc)):
@@ -177,10 +178,7 @@ def _rotation_readability_score(page: "fitz.Page", rotation: int) -> int:
     return score
 
 def auto_rotate_image_for_ocr(image):
-    """
-    Use Tesseract OSD to detect page orientation and rotate
-    image upright before OCR.
-    """
+    """Rotate a rendered page image upright using Tesseract OSD when possible."""
     try:
         osd = pytesseract.image_to_osd(image)
         logger.info("OSD OUTPUT:\n%s", osd)
@@ -212,6 +210,7 @@ def auto_rotate_image_for_ocr(image):
     return image
 
 def normalize_orientation(page: "fitz.Page") -> None:
+    """Rotate landscape pages upright before text extraction begins."""
     try:
         rect = page.rect
 
@@ -233,19 +232,19 @@ def normalize_orientation(page: "fitz.Page") -> None:
         )
 
 def is_searchable(page) -> bool:
-    """
-    Determine if page has enough native text to skip OCR.
-    """
+    """Return True when a page already has enough native text to skip OCR."""
     text = page.get_text("text") or ""
     return len(text.strip()) >= MIN_SEARCHABLE_TEXT_CHARS
 
 def extract_words(page):
+    """Return word boxes from native text when possible, otherwise from OCR."""
     if is_searchable(page):
         return page.get_text("words"), "TEXT"
     else:
         return ocr_words(page), "OCR"
 
 def ocr_words(page):
+    """OCR a page and return word boxes in the same shape as PyMuPDF output."""
     zoom = OCR_ZOOM
     mat = fitz.Matrix(zoom, zoom)
     pix = page.get_pixmap(matrix=mat)
@@ -253,9 +252,6 @@ def ocr_words(page):
     img = np.frombuffer(pix.samples, dtype=np.uint8)
     img = img.reshape(pix.height, pix.width, -1)
 
-    # ✅ APPLY PREPROCESSING (CRITICAL)
-    # image = Image.fromarray(img)
-    # image = preprocess_for_ocr(image)
     image = Image.fromarray(img)
 
     image = auto_rotate_image_for_ocr(image)
@@ -263,7 +259,6 @@ def ocr_words(page):
     image = preprocess_for_ocr(image)
 
     processed = np.array(image)
-    # ✅ FIX: handle both grayscale and RGB safely
     if len(processed.shape) == 3:
         gray = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
     else:

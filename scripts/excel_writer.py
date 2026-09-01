@@ -33,6 +33,7 @@ _FOUR_COL_WIDTHS = [30, 45, 16, 20]
 
 
 def _write_page_sheet(worksheet: Worksheet, page: SchedulePageResult) -> None:
+    """Render one extracted page into a worksheet with consistent styling."""
     # Use 'Investment' as the identity header for tickered layouts
     identity_label = "Investment" if (page.source or "").upper().startswith("TICKERED") else "Identity"
     if page.has_cost_column:
@@ -93,7 +94,7 @@ def write_workbook(pages: List[SchedulePageResult], output_path: str) -> None:
 
 
 def write_error_workbook(output_path: str, error_text: str) -> None:
-    """Write a single-sheet workbook containing the error text for failed PDFs."""
+    """Write a one-sheet workbook that captures a processing failure."""
     workbook = Workbook()
     worksheet = workbook.active
     worksheet.title = "Error"

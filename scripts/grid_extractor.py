@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def _count_clustered_positions(indices: np.ndarray, max_gap: int = 3) -> int:
+    """Collapse nearby pixel hits into a count of distinct visual lines."""
     if indices.size == 0:
         return 0
 
@@ -27,6 +28,7 @@ def _count_clustered_positions(indices: np.ndarray, max_gap: int = 3) -> int:
 
 
 def _count_intersection_clusters(mask: np.ndarray) -> int:
+    """Count grid-like intersections in a binary mask after line detection."""
     if mask.size == 0:
         return 0
 
@@ -40,6 +42,7 @@ def _count_intersection_clusters(mask: np.ndarray) -> int:
 
 
 def _get_image_grid_structure_metrics(page) -> Tuple[bool, int, int, int]:
+    """Detect ruled table structure directly from the rendered page image."""
     try:
         image = render_page_to_image(page, zoom=2.0)
         gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
@@ -84,6 +87,7 @@ def _get_image_grid_structure_metrics(page) -> Tuple[bool, int, int, int]:
 
 
 def _to_point_tuple(point) -> Optional[Tuple[float, float]]:
+    """Normalize a PyMuPDF point-like object into a plain `(x, y)` tuple."""
     try:
         if hasattr(point, "x") and hasattr(point, "y"):
             return float(point.x), float(point.y)
@@ -95,6 +99,7 @@ def _to_point_tuple(point) -> Optional[Tuple[float, float]]:
 
 
 def _to_rect_tuple(rect) -> Optional[Tuple[float, float, float, float]]:
+    """Normalize a rectangle-like object into an `(x0, y0, x1, y1)` tuple."""
     try:
         if rect is None:
             return None
@@ -108,10 +113,12 @@ def _to_rect_tuple(rect) -> Optional[Tuple[float, float, float, float]]:
 
 
 def _expand_rect(rect: Tuple[float, float, float, float], margin: float) -> Tuple[float, float, float, float]:
+    """Grow a rectangle by a small margin on all sides."""
     return rect[0] - margin, rect[1] - margin, rect[2] + margin, rect[3] + margin
 
 
 def _rects_overlap(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> bool:
+    """Return True when two rectangles intersect or touch."""
     return not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1])
 
 
@@ -120,6 +127,7 @@ def _segment_intersects_rect(
     p2: Tuple[float, float],
     rect: Tuple[float, float, float, float],
 ) -> bool:
+    """Return True when a line segment's bounding box overlaps a rectangle."""
     x_min = min(p1[0], p2[0])
     x_max = max(p1[0], p2[0])
     y_min = min(p1[1], p2[1])
@@ -128,12 +136,8 @@ def _segment_intersects_rect(
     return _rects_overlap(seg_rect, rect)
 
 
-def _has_visual_grid_structure(page, table_bbox) -> bool:
-    ok, _, _, _ = _get_visual_grid_structure_metrics(page, table_bbox)
-    return ok
-
-
 def _get_visual_grid_structure_metrics(page, table_bbox) -> Tuple[bool, int, int, int]:
+    """Measure ruled line structure around a candidate PyMuPDF table bbox."""
     bbox = _to_rect_tuple(table_bbox)
     if bbox is None:
         return False, 0, 0, 0
@@ -203,7 +207,7 @@ def _get_visual_grid_structure_metrics(page, table_bbox) -> Tuple[bool, int, int
 
 
 def extract_grid_rows_from_page(page, page_index: int) -> List[List[str]]:
-    """Extract grid-format SOA rows from a page with orientation fallbacks."""
+    """Extract rows from a visually boxed Schedule of Assets page."""
     try:
         logger.info("Analyzing page %d for Grid SOA.", page_index + 1)
         original_rotation = getattr(page, "rotation", 0)
@@ -234,6 +238,7 @@ def extract_grid_rows_from_page(page, page_index: int) -> List[List[str]]:
 
 
 def _extract_grid_rows_current_orientation(page) -> List[List[str]]:
+    """Run table extraction for the page's current orientation only."""
     try:
         tables_finder = None
         image_grid_metrics = None
@@ -469,11 +474,8 @@ def _extract_grid_rows_current_orientation(page) -> List[List[str]]:
     return []
 
 
-def is_grid_among_pages(doc, page_indices: List[int]) -> bool:
-    return bool(get_grid_page_indices(doc, page_indices))
-
-
 def get_grid_page_indices(doc, page_indices: List[int]) -> List[int]:
+    """Return Schedule H pages that should be treated as grid pages."""
     grid_pages: List[int] = []
     for i in page_indices:
         if i < 0 or i >= len(doc):
@@ -505,6 +507,7 @@ def get_grid_page_indices(doc, page_indices: List[int]) -> List[int]:
 
 
 def process_grid_pdf(pdf_path: str, page_indices: Optional[List[int]] = None) -> ExtractionResult:
+    """Process only grid-classified pages from a PDF and return workbook-ready rows."""
     doc = open_document(pdf_path)
     try:
         if page_indices is None:
@@ -526,7 +529,7 @@ def process_grid_pdf(pdf_path: str, page_indices: Optional[List[int]] = None) ->
 
             if not rows:
                 logger.info("Grid extractor: using text fallback on grid-classified page %d", i + 1)
-                words, source = extract_words(page)
+                words, _ = extract_words(page)
                 parsed_rows, has_cost_column = parse_schedule_h_page(words)
                 if not parsed_rows:
                     logger.info("Grid extractor: no rows recovered from text fallback on page %d", i + 1)
