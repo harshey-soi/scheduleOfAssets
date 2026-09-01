@@ -20,6 +20,7 @@ import cv2
 import config as config_module
 
 from config import (
+    COST_HEADER_RE,
     DESCRIPTION_HEADER_RE,
     IDENTITY_HEADER_RE,
     MIN_SEARCHABLE_TEXT_CHARS,
@@ -27,6 +28,7 @@ from config import (
     OCR_ZOOM,
     QUICK_OCR_ZOOM,
     SCHEDULE_H_HEADING_RE,
+    VALUE_HEADER_RE,
 )
 from ocr_preprocessing import preprocess_for_ocr
 from utils import sanitize_filename
@@ -37,6 +39,12 @@ SCHEDULE_OF_ASSETS_FALLBACK_RE = getattr(
     config_module,
     "SCHEDULE_OF_ASSETS_FALLBACK_RE",
     re.compile(r"schedule\s+of\s+assets\b", re.IGNORECASE),
+)
+
+# Some filings label the first table column as "Issuer" instead of "Identity".
+_IDENTITY_HEADER_FALLBACK_RE = re.compile(
+    r"\b(?:identity\s+of\s+issuer|identity|issuer)\b",
+    re.IGNORECASE,
 )
 
 
@@ -113,7 +121,12 @@ def extract_plan_name(doc: "fitz.Document") -> str:
 
 
 def find_schedule_h_pages(doc):
-    """Return page indices that look like Schedule H or Schedule of Assets pages."""
+    """Return page indices whose Schedule H heading and headers appear in the top region.
+
+    A page is accepted only when the heading and required column-header tokens are
+    detected within the top 35% of that page. This prevents narrative pages from
+    being misclassified just because they mention Schedule H terms in body text.
+    """
     pages = []
 
     for i in range(len(doc)):
@@ -122,32 +135,79 @@ def find_schedule_h_pages(doc):
         # Rotate page BEFORE trying to detect Schedule H
         normalize_orientation(page)
 
-        text = page.get_text("text")
+        text = page.get_text("text") or ""
+        words = page.get_text("words") if len(text.strip()) >= MIN_SEARCHABLE_TEXT_CHARS else ocr_words(page)
 
-        if len(text.strip()) < MIN_SEARCHABLE_TEXT_CHARS:
-            words = ocr_words(page)
-            text = " ".join([w[4] for w in words])
+        top_text = _build_top_region_text(words, top_ratio=0.35, page_height=float(page.rect.height))
+        top_text_lower = top_text.lower()
 
-        if SCHEDULE_H_HEADING_RE.search(text):
-            pages.append(i)
-            continue
-
-        # Safe fallback for filings whose heading only says "Schedule of Assets".
-        # Require the short heading plus recognizable Schedule H column headers,
-        # so we do not over-match unrelated pages.
-        top_text = " ".join(text.splitlines()[:40])
+        has_schedule_h_heading = bool(SCHEDULE_H_HEADING_RE.search(top_text))
         has_short_heading = bool(SCHEDULE_OF_ASSETS_FALLBACK_RE.search(top_text))
-        has_identity_header = bool(IDENTITY_HEADER_RE.search(top_text))
+        has_identity_header = bool(IDENTITY_HEADER_RE.search(top_text)) or bool(
+            _IDENTITY_HEADER_FALLBACK_RE.search(top_text)
+        )
         has_description_header = bool(DESCRIPTION_HEADER_RE.search(top_text))
-        has_value_header = ("current value" in top_text.lower()) or ("cost" in top_text.lower())
-        if has_short_heading and has_identity_header and has_description_header and has_value_header:
-            logger.info(
-                "Schedule H fallback detection accepted page %d via 'Schedule of Assets' heading + column headers",
-                i + 1,
-            )
+        has_value_or_cost_header = bool(VALUE_HEADER_RE.search(top_text)) or bool(COST_HEADER_RE.search(top_text))
+
+        has_all_headers_in_top_region = (
+            has_identity_header and has_description_header and has_value_or_cost_header
+        )
+
+        if has_all_headers_in_top_region and (has_schedule_h_heading or has_short_heading):
+            if has_short_heading and not has_schedule_h_heading:
+                logger.info(
+                    "Schedule H fallback detection accepted page %d via top-region heading + headers",
+                    i + 1,
+                )
             pages.append(i)
+        else:
+            logger.debug(
+                "Skipping page %d for Schedule H detection; top-region checks failed "
+                "(heading=%s short_heading=%s identity=%s description=%s value_or_cost=%s)",
+                i + 1,
+                has_schedule_h_heading,
+                has_short_heading,
+                has_identity_header,
+                has_description_header,
+                has_value_or_cost_header,
+            )
 
     return pages
+
+
+def _build_top_region_text(words, top_ratio: float = 0.35, page_height: float | None = None) -> str:
+    """Build a reading-order text snapshot from the top portion of a page.
+
+    Uses page height when word coordinates are in PDF space. If the coordinates
+    appear to come from OCR pixel space instead, it falls back to a ratio based
+    on observed word extents.
+    """
+    if not words:
+        return ""
+
+    ratio = max(0.0, min(top_ratio, 1.0))
+    min_y = min(float(w[1]) for w in words)
+    max_y = max(float(w[3]) for w in words)
+
+    use_page_height = False
+    if page_height and page_height > 0:
+        # If the observed y-range is near page-space magnitude, trust page height.
+        # OCR outputs often use pixel coordinates and can be several multiples of
+        # page-space points, so we avoid mixing units in that case.
+        if max_y <= (page_height * 1.5):
+            use_page_height = True
+
+    if use_page_height:
+        top_limit = page_height * ratio
+    else:
+        top_limit = max_y * ratio
+
+    top_words = [w for w in words if ((float(w[1]) + float(w[3])) / 2.0) <= top_limit]
+    if not top_words:
+        return ""
+
+    top_words.sort(key=lambda w: (round(float(w[1]), 1), float(w[0])))
+    return " ".join(str(w[4]) for w in top_words if str(w[4]).strip())
 
 
 def _rotation_readability_score(page: "fitz.Page", rotation: int) -> int:
