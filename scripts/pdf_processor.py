@@ -10,12 +10,14 @@ regardless of whether the page was natively searchable or had to be OCR'd.
 from __future__ import annotations
 
 import logging
+import re
 from typing import List, Tuple
 import numpy as np
 import fitz  # PyMuPDF
 import pytesseract
 from PIL import Image
 import cv2
+import config as config_module
 
 from config import (
     DESCRIPTION_HEADER_RE,
@@ -24,13 +26,18 @@ from config import (
     OCR_TESSERACT_CONFIG,
     OCR_ZOOM,
     QUICK_OCR_ZOOM,
-    SCHEDULE_OF_ASSETS_FALLBACK_RE,
     SCHEDULE_H_HEADING_RE,
 )
 from ocr_preprocessing import preprocess_for_ocr
 from utils import sanitize_filename
 
 logger = logging.getLogger(__name__)
+
+SCHEDULE_OF_ASSETS_FALLBACK_RE = getattr(
+    config_module,
+    "SCHEDULE_OF_ASSETS_FALLBACK_RE",
+    re.compile(r"schedule\s+of\s+assets\b", re.IGNORECASE),
+)
 
 
 def open_document(pdf_path: str) -> fitz.Document:
