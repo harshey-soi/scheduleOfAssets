@@ -106,10 +106,9 @@ SCHEDULE_H_HEADING_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Broader match used as a fallback for headings that simply say
-# "Schedule of Assets" (many filings use this shorter heading).
-# NOTE: removal: 'Schedule of Assets' fallback regex reverted to avoid
-# overbroad page-matching. Use `SCHEDULE_H_HEADING_RE` for page detection.
+# Broader heading fragment used only with column-header checks as a safe
+# fallback for filings whose page title is simply "Schedule of Assets".
+SCHEDULE_OF_ASSETS_FALLBACK_RE = re.compile(r"schedule\s+of\s+assets\b", re.IGNORECASE)
 
 # A different lettered schedule heading (e.g. "Schedule G") signals that
 # Schedule H content has ended.

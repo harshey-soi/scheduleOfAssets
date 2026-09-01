@@ -24,6 +24,7 @@ from config import (
     OCR_TESSERACT_CONFIG,
     OCR_ZOOM,
     QUICK_OCR_ZOOM,
+    SCHEDULE_OF_ASSETS_FALLBACK_RE,
     SCHEDULE_H_HEADING_RE,
 )
 from ocr_preprocessing import preprocess_for_ocr
@@ -121,12 +122,24 @@ def find_schedule_h_pages(doc):
 
         if SCHEDULE_H_HEADING_RE.search(text):
             pages.append(i)
+            continue
+
+        # Safe fallback for filings whose heading only says "Schedule of Assets".
+        # Require the short heading plus recognizable Schedule H column headers,
+        # so we do not over-match unrelated pages.
+        top_text = " ".join(text.splitlines()[:40])
+        has_short_heading = bool(SCHEDULE_OF_ASSETS_FALLBACK_RE.search(top_text))
+        has_identity_header = bool(IDENTITY_HEADER_RE.search(top_text))
+        has_description_header = bool(DESCRIPTION_HEADER_RE.search(top_text))
+        has_value_header = ("current value" in top_text.lower()) or ("cost" in top_text.lower())
+        if has_short_heading and has_identity_header and has_description_header and has_value_header:
+            logger.info(
+                "Schedule H fallback detection accepted page %d via 'Schedule of Assets' heading + column headers",
+                i + 1,
+            )
+            pages.append(i)
 
     return pages
-
-
-# NOTE: 'Schedule of Assets' fallback detection removed — reverted to
-# rely solely on `SCHEDULE_H_HEADING_RE` for Schedule H page discovery.
 
 
 def _rotation_readability_score(page: "fitz.Page", rotation: int) -> int:
