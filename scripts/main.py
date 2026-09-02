@@ -29,6 +29,11 @@ import tickered
 import grid_extractor
 from schedule_parser import parse_schedule_h_page
 from utils import configure_logging, sanitize_filename
+import pytesseract
+
+pytesseract.pytesseract.tesseract_cmd = (
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+)
 
 logger = logging.getLogger(__name__)
 
