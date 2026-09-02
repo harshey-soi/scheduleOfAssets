@@ -20,6 +20,7 @@ from pdf_processor import (
     extract_words,
     find_schedule_h_pages,
     get_tickered_page_indices,
+    is_normal_soa_page,
     normalize_orientation,
     open_document,
     is_tickered_document,
@@ -33,14 +34,14 @@ from utils import configure_logging, sanitize_filename
 logger = logging.getLogger(__name__)
 
 
-def process_pdf(pdf_path: str) -> ExtractionResult:
-    """Run the full extraction pipeline for a single PDF."""
+def process_pdf(pdf_path: str, page_indices: list[int] | None = None) -> ExtractionResult:
+    """Run the standard parser for a single PDF or an explicit page subset."""
     doc = open_document(pdf_path)
     try:
         plan_name = extract_plan_name(doc)
         logger.info("Plan name: %s", plan_name)
 
-        target_pages = find_schedule_h_pages(doc)
+        target_pages = page_indices if page_indices is not None else find_schedule_h_pages(doc)
         if not target_pages:
             raise ValueError("No Schedule H pages were found in this PDF.")
         logger.info("Schedule H found on page(s): %s", [p + 1 for p in target_pages])
@@ -104,7 +105,8 @@ def process_input_file(pdf_path: str) -> bool:
                     doc,
                     [p for p in target_pages if p not in set(tickered_pages)],
                 ) if target_pages else []
-                normal_pages = [p for p in target_pages if p not in set(tickered_pages) and p not in set(grid_pages)]
+                normal_candidates = [p for p in target_pages if p not in set(tickered_pages) and p not in set(grid_pages)]
+                normal_pages = [p for p in normal_candidates if is_normal_soa_page(doc[p], top_ratio=0.35)]
 
                 logger.info(
                     "Schedule H page classification | tickered=%s | grid=%s | normal=%s",
@@ -112,6 +114,13 @@ def process_input_file(pdf_path: str) -> bool:
                     [p + 1 for p in grid_pages],
                     [p + 1 for p in normal_pages],
                 )
+
+                if len(normal_pages) != len(normal_candidates):
+                    skipped = [p + 1 for p in normal_candidates if p not in set(normal_pages)]
+                    logger.info(
+                        "Normal SOA top-35%% header check skipped page(s): %s",
+                        skipped,
+                    )
 
                 tickered_among = bool(target_pages) and is_tickered_among_pages(doc, target_pages)
                 tickered_doc = False
@@ -161,7 +170,7 @@ def process_input_file(pdf_path: str) -> bool:
                     )
                     result = grid_extractor.process_grid_pdf(pdf_path, page_indices=grid_pages)
                 else:
-                    result = process_pdf(pdf_path)
+                    result = process_pdf(pdf_path, page_indices=normal_pages)
         finally:
             doc.close()
 

@@ -12,6 +12,28 @@ from schedule_parser import parse_schedule_h_page
 logger = logging.getLogger(__name__)
 
 
+def _looks_like_grid_header_text(text: str) -> bool:
+    """Return True when page text matches the classic Schedule H 4i grid header."""
+    if not text:
+        return False
+
+    lower = " ".join(text.lower().split())
+    has_schedule = ("schedule h" in lower) and ("held at end of year" in lower)
+    has_identity = ("identity of issuer" in lower) or ("issuer, borrower" in lower)
+    has_description = "description of investment" in lower
+    has_cost = "cost" in lower
+    has_value = "current value" in lower
+
+    # Column-marker style header used by boxed grid pages.
+    marker_hits = sum(1 for token in ["(a)", "(b)", "(c)", "(d)", "(e)"] if token in lower)
+
+    if has_schedule and has_identity and has_description and has_value:
+        return True
+    if has_identity and has_description and has_cost and has_value and marker_hits >= 3:
+        return True
+    return False
+
+
 def _count_clustered_positions(indices: np.ndarray, max_gap: int = 3) -> int:
     """Collapse nearby pixel hits into a count of distinct visual lines."""
     if indices.size == 0:
@@ -79,7 +101,10 @@ def _get_image_grid_structure_metrics(page) -> Tuple[bool, int, int, int]:
             intersection_count,
         )
 
-        is_grid = horizontal_count >= 8 and vertical_count >= 4 and intersection_count >= 12
+        # Rotated Schedule H pages often produce thinner, partially broken line
+        # detections. Keep the detector conservative, but not so strict that a
+        # clearly boxed table gets rejected after rotation.
+        is_grid = horizontal_count >= 6 and vertical_count >= 4 and intersection_count >= 8
         return is_grid, horizontal_count, vertical_count, intersection_count
     except Exception as exc:
         logger.debug("Grid image check failed: %s", exc)
@@ -330,18 +355,36 @@ def _extract_grid_rows_current_orientation(page) -> List[List[str]]:
                             image_intersections,
                         )
                     else:
-                        logger.debug(
-                            "Grid extractor: table-like content on page rejected by visual grid check; header=%s horiz_positions=%d vert_positions=%d rects=%d bbox=%s image_horiz=%d image_vert=%d image_intersections=%d",
-                            lower_header,
-                            horiz_count,
-                            vert_count,
-                            rect_count,
-                            _to_rect_tuple(getattr(table, "bbox", None)),
-                            image_horiz,
-                            image_vert,
-                            image_intersections,
-                        )
-                        continue
+                        # Some rotated Schedule H pages are detected by PyMuPDF's
+                        # table finder even when the line-count heuristics are too
+                        # conservative. If the table already has a believable
+                        # Schedule H header row and enough rows to look like a real
+                        # extract, keep it instead of discarding it as a false negative.
+                        if len(grid_data) >= 5:
+                            logger.debug(
+                                "Grid extractor: accepting weak visual table on page via table header fallback; header=%s horiz_positions=%d vert_positions=%d rects=%d bbox=%s image_horiz=%d image_vert=%d image_intersections=%d",
+                                lower_header,
+                                horiz_count,
+                                vert_count,
+                                rect_count,
+                                _to_rect_tuple(getattr(table, "bbox", None)),
+                                image_horiz,
+                                image_vert,
+                                image_intersections,
+                            )
+                        else:
+                            logger.debug(
+                                "Grid extractor: table-like content on page rejected by visual grid check; header=%s horiz_positions=%d vert_positions=%d rects=%d bbox=%s image_horiz=%d image_vert=%d image_intersections=%d",
+                                lower_header,
+                                horiz_count,
+                                vert_count,
+                                rect_count,
+                                _to_rect_tuple(getattr(table, "bbox", None)),
+                                image_horiz,
+                                image_vert,
+                                image_intersections,
+                            )
+                            continue
 
                 filtered_rows: List[List[str]] = []
                 # Helper to detect numeric-like cells (amounts)
@@ -480,29 +523,75 @@ def get_grid_page_indices(doc, page_indices: List[int]) -> List[int]:
     for i in page_indices:
         if i < 0 or i >= len(doc):
             continue
-        rows = extract_grid_rows_from_page(doc[i], i)
+        page = doc[i]
+
+        rows = extract_grid_rows_from_page(page, i)
         if rows:
             grid_pages.append(i)
             continue
 
-        image_grid_ok, image_horiz, image_vert, image_intersections = _get_image_grid_structure_metrics(doc[i])
-        if image_grid_ok:
-            logger.info(
-                "Grid classifier: page %d accepted via image grid detector (horiz=%d vert=%d intersections=%d)",
-                i + 1,
-                image_horiz,
-                image_vert,
-                image_intersections,
-            )
-            grid_pages.append(i)
-        else:
-            logger.debug(
-                "Grid classifier: page %d rejected by image grid detector (horiz=%d vert=%d intersections=%d)",
-                i + 1,
-                image_horiz,
-                image_vert,
-                image_intersections,
-            )
+        original_rotation = getattr(page, "rotation", 0)
+        rotation_candidates = [original_rotation, (original_rotation + 90) % 360, (original_rotation + 270) % 360]
+        accepted = False
+        for rotation in rotation_candidates:
+            try:
+                page.set_rotation(rotation)
+            except Exception:
+                pass
+
+            image_grid_ok, image_horiz, image_vert, image_intersections = _get_image_grid_structure_metrics(page)
+            if image_grid_ok:
+                logger.info(
+                    "Grid classifier: page %d accepted via image grid detector at rotation %d (horiz=%d vert=%d intersections=%d)",
+                    i + 1,
+                    rotation,
+                    image_horiz,
+                    image_vert,
+                    image_intersections,
+                )
+                grid_pages.append(i)
+                accepted = True
+                break
+
+        try:
+            page.set_rotation(original_rotation)
+        except Exception:
+            pass
+
+        if not accepted:
+            # Final fallback: some pages have a clear boxed Schedule H 4i
+            # header in text, but line/table detection still misses due to
+            # rendering quirks. Check text across rotations before rejecting.
+            text_accept = False
+            text_rotation = original_rotation
+            for rotation in rotation_candidates:
+                try:
+                    page.set_rotation(rotation)
+                except Exception:
+                    pass
+                page_text = page.get_text("text") or ""
+                if _looks_like_grid_header_text(page_text):
+                    text_accept = True
+                    text_rotation = rotation
+                    break
+
+            try:
+                page.set_rotation(original_rotation)
+            except Exception:
+                pass
+
+            if text_accept:
+                logger.info(
+                    "Grid classifier: page %d accepted via Schedule H grid-header fallback at rotation %d",
+                    i + 1,
+                    text_rotation,
+                )
+                grid_pages.append(i)
+            else:
+                logger.debug(
+                    "Grid classifier: page %d rejected after rotation-aware image and header checks",
+                    i + 1,
+                )
     return grid_pages
 
 

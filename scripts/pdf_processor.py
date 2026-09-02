@@ -27,6 +27,7 @@ from config import (
     OCR_ZOOM,
     QUICK_OCR_ZOOM,
     SCHEDULE_H_HEADING_RE,
+    VALUE_HEADER_RE,
 )
 from ocr_preprocessing import preprocess_for_ocr
 from utils import sanitize_filename
@@ -122,7 +123,7 @@ def find_schedule_h_pages(doc):
         # Rotate page BEFORE trying to detect Schedule H
         normalize_orientation(page)
 
-        text = page.get_text("text")
+        text = page.get_text("text") or ""
 
         if len(text.strip()) < MIN_SEARCHABLE_TEXT_CHARS:
             words = ocr_words(page)
@@ -133,13 +134,11 @@ def find_schedule_h_pages(doc):
             continue
 
         # Safe fallback for filings whose heading only says "Schedule of Assets".
-        # Require the short heading plus recognizable Schedule H column headers,
-        # so we do not over-match unrelated pages.
         top_text = " ".join(text.splitlines()[:40])
         has_short_heading = bool(SCHEDULE_OF_ASSETS_FALLBACK_RE.search(top_text))
-        has_identity_header = bool(IDENTITY_HEADER_RE.search(top_text))
+        has_identity_header = bool(IDENTITY_HEADER_RE.search(top_text)) or ("issuer" in top_text.lower())
         has_description_header = bool(DESCRIPTION_HEADER_RE.search(top_text))
-        has_value_header = ("current value" in top_text.lower()) or ("cost" in top_text.lower())
+        has_value_header = bool(VALUE_HEADER_RE.search(top_text))
         if has_short_heading and has_identity_header and has_description_header and has_value_header:
             logger.info(
                 "Schedule H fallback detection accepted page %d via 'Schedule of Assets' heading + column headers",
@@ -148,6 +147,46 @@ def find_schedule_h_pages(doc):
             pages.append(i)
 
     return pages
+
+
+def _build_top_region_text(words, top_ratio: float = 0.35, page_height: float | None = None) -> str:
+    """Build reading-order text from the top portion of a page."""
+    if not words:
+        return ""
+
+    ratio = max(0.0, min(top_ratio, 1.0))
+    max_y = max(float(w[3]) for w in words)
+
+    use_page_height = bool(page_height and page_height > 0 and max_y <= (page_height * 1.5))
+    top_limit = (page_height * ratio) if use_page_height else (max_y * ratio)
+
+    top_words = [w for w in words if ((float(w[1]) + float(w[3])) / 2.0) <= top_limit]
+    if not top_words:
+        return ""
+
+    top_words.sort(key=lambda w: (round(float(w[1]), 1), float(w[0])))
+    return " ".join(str(w[4]) for w in top_words if str(w[4]).strip())
+
+
+def is_normal_soa_page(page: "fitz.Page", top_ratio: float = 0.35) -> bool:
+    """Return True when normal SOA headers are all present in the page's top region."""
+    try:
+        normalize_orientation(page)
+        text = page.get_text("text") or ""
+        words = page.get_text("words") if len(text.strip()) >= MIN_SEARCHABLE_TEXT_CHARS else ocr_words(page)
+        top_text = _build_top_region_text(words, top_ratio=top_ratio, page_height=float(page.rect.height))
+
+        has_schedule_heading = bool(SCHEDULE_H_HEADING_RE.search(top_text)) or bool(
+            SCHEDULE_OF_ASSETS_FALLBACK_RE.search(top_text)
+        )
+        has_identity_header = bool(IDENTITY_HEADER_RE.search(top_text)) or ("issuer" in top_text.lower())
+        has_description_header = bool(DESCRIPTION_HEADER_RE.search(top_text))
+        has_value_header = bool(VALUE_HEADER_RE.search(top_text))
+
+        return has_schedule_heading and has_identity_header and has_description_header and has_value_header
+    except Exception as exc:
+        logger.debug("Normal SOA top-region check failed on page %d: %s", page.number + 1, exc)
+        return False
 
 
 def _rotation_readability_score(page: "fitz.Page", rotation: int) -> int:
@@ -297,6 +336,23 @@ def _is_tickered_page(text: str) -> bool:
         return False
 
     top_text = " ".join(text.splitlines()[:40]).lower()
+
+    # Guardrail: do not classify classic Schedule H grid/non-tickered headers
+    # as tickered pages. Rotated OCR can include words like "maturity date"
+    # and "current value" on normal grid tables.
+    non_tickered_markers = [
+        "identity of issuer",
+        "description of investment including",
+        "(a)",
+        "(b)",
+        "(c)",
+        "(d)",
+        "(e)",
+        "schedule h, line 4i",
+    ]
+    if any(marker in top_text for marker in non_tickered_markers):
+        return False
+
     required = [
         "investment option",
         "maturity date",
@@ -306,14 +362,10 @@ def _is_tickered_page(text: str) -> bool:
     ]
     present = [token for token in required if token in top_text]
 
-    # Accept when the clear pair of headers is present (most robust):
+    # Accept only when the explicit tickered anchor exists.
+    # This avoids false positives on standard/grid Schedule H pages.
     if "investment option" in top_text and "current value" in top_text:
         logger.debug("Tickered check: detected required pair tokens: %s", present)
-        return True
-
-    # Otherwise accept if a majority of tokens appear (tolerant fallback).
-    if len(present) >= 3:
-        logger.debug("Tickered check: majority tokens present: %s", present)
         return True
 
     missing = [token for token in required if token not in top_text]
