@@ -887,7 +887,7 @@ def parse_schedule_h_page(raw_words):
                         value_hit = (s_val, e_val)
 
         # Additional heuristic: if the chosen run is a short numeric token
-        # (no comma, no leading '$', digits <= 4) and the *next* visual
+        # (no comma, no leading '$', up to 4 digits) and the *next* visual
         # row is numeric-only (a separate line containing the real value),
         # prefer the next row instead of this short token which is likely
         # part of the identity (e.g. '500' in '500 Index Fund'). Clear
@@ -900,10 +900,17 @@ def parse_schedule_h_page(raw_words):
                 run_text = "".join(w.text for w in run_words)
                 digits = re.sub(r"\D", "", run_text)
                 has_comma_or_dollar = any(("," in w.text or w.text.strip().startswith("$")) for w in run_words)
-                # Only treat short runs of exactly 4 digits as potential
-                # embedded-year/fund tokens to reject; allow 1-3 digit
-                # numeric values to be considered valid monetary values.
-                if digits and len(digits) == 4 and not has_comma_or_dollar:
+                # Treat short runs up to 4 digits as suspicious only when
+                # they do NOT sit in the detected numeric column. This keeps
+                # genuine small values while rejecting embedded tokens like
+                # '500' in '500 Index Fund'.
+                run_meanx = statistics.mean([w.xc for w in run_words])
+                in_numeric_column_current = (
+                    numeric_x_median is not None
+                    and abs(run_meanx - numeric_x_median) <= _NUMERIC_COLUMN_TOLERANCE_PT
+                )
+
+                if digits and len(digits) <= 4 and not has_comma_or_dollar and not in_numeric_column_current:
                     if idx + 1 < len(body_lines) and numeric_x_median is not None:
                         next_row = strip_leading_markers(body_lines[idx + 1])
                         # Require the next row to be numeric-only and its
