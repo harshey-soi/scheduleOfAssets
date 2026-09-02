@@ -903,7 +903,7 @@ def parse_schedule_h_page(raw_words):
                 # Only treat short runs of exactly 4 digits as potential
                 # embedded-year/fund tokens to reject; allow 1-3 digit
                 # numeric values to be considered valid monetary values.
-                if digits and len(digits) == 4 and not has_comma_or_dollar:
+                if digits and len(digits) >= 3 and not has_comma_or_dollar:
                     if idx + 1 < len(body_lines) and numeric_x_median is not None:
                         next_row = strip_leading_markers(body_lines[idx + 1])
                         # Require the next row to be numeric-only and its

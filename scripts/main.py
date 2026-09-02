@@ -122,13 +122,16 @@ def process_input_file(pdf_path: str) -> bool:
                         skipped,
                     )
 
-                tickered_among = bool(target_pages) and is_tickered_among_pages(doc, target_pages)
+                # We already computed page-level tickered matches above.
+                # Re-running OCR-heavy tickered probes here causes large delays.
+                tickered_among = bool(tickered_pages)
                 tickered_doc = False
                 try:
                     # Document-level detection can pick up header variants that
                     # aren't present on the exact Schedule H page slice. Use as
-                    # a tolerant fallback when page-level check fails.
-                    if not tickered_among:
+                    # a tolerant fallback only when Schedule H pages were not
+                    # discovered at all.
+                    if not tickered_among and not target_pages:
                         tickered_doc = is_tickered_document(doc)
                 except Exception:
                     tickered_doc = False
