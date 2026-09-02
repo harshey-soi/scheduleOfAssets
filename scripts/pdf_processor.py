@@ -149,7 +149,7 @@ def find_schedule_h_pages(doc):
     return pages
 
 
-def _build_top_region_text(words, top_ratio: float = 0.35, page_height: float | None = None) -> str:
+def _build_top_region_text(words, top_ratio: float = 0.40, page_height: float | None = None) -> str:
     """Build reading-order text from the top portion of a page."""
     if not words:
         return ""
@@ -168,7 +168,7 @@ def _build_top_region_text(words, top_ratio: float = 0.35, page_height: float | 
     return " ".join(str(w[4]) for w in top_words if str(w[4]).strip())
 
 
-def is_normal_soa_page(page: "fitz.Page", top_ratio: float = 0.35) -> bool:
+def is_normal_soa_page(page: "fitz.Page", top_ratio: float = 0.40) -> bool:
     """Return True when normal SOA headers are all present in the page's top region."""
     try:
         normalize_orientation(page)

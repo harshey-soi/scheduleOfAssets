@@ -106,7 +106,7 @@ def process_input_file(pdf_path: str) -> bool:
                     [p for p in target_pages if p not in set(tickered_pages)],
                 ) if target_pages else []
                 normal_candidates = [p for p in target_pages if p not in set(tickered_pages) and p not in set(grid_pages)]
-                normal_pages = [p for p in normal_candidates if is_normal_soa_page(doc[p], top_ratio=0.35)]
+                normal_pages = [p for p in normal_candidates if is_normal_soa_page(doc[p], top_ratio=0.40)]
 
                 logger.info(
                     "Schedule H page classification | tickered=%s | grid=%s | normal=%s",
@@ -118,7 +118,7 @@ def process_input_file(pdf_path: str) -> bool:
                 if len(normal_pages) != len(normal_candidates):
                     skipped = [p + 1 for p in normal_candidates if p not in set(normal_pages)]
                     logger.info(
-                        "Normal SOA top-35%% header check skipped page(s): %s",
+                        "Normal SOA top-40%% header check skipped page(s): %s",
                         skipped,
                     )
 
