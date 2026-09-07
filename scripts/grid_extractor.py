@@ -1,3 +1,11 @@
+# Detects and parses Schedule H pages that use a visually ruled/boxed
+# ("grid") table layout, as opposed to the plain text-flow layout handled
+# by schedule_parser.py or the OCR-only tickered layout in tickered.py.
+#
+# Detection combines PyMuPDF's native table finder with two visual
+# fallbacks (ruling-line analysis on the page's vector drawings, and pixel
+# projection analysis on the rendered page image) so rotated/scanned grid
+# pages are still recognized even when line-drawing metadata is missing.
 import re
 import logging
 from typing import List, Optional, Tuple
@@ -291,6 +299,9 @@ def _extract_grid_rows_current_orientation(page) -> List[List[str]]:
                 header_row_idx = None
                 lower_header = []
                 identity_idx = desc_idx = cost_idx = val_idx = None
+                # The header row isn't always grid_data[0] (some tables have a
+                # blank or partial first row), so scan the first few rows for
+                # one that has all four expected Schedule H column labels.
                 header_scan_limit = min(6, len(grid_data))
                 header_samples = []
                 for candidate_idx in range(header_scan_limit):
@@ -390,6 +401,9 @@ def _extract_grid_rows_current_orientation(page) -> List[List[str]]:
                 # Helper to detect numeric-like cells (amounts)
                 numeric_re = re.compile(r"[0-9][0-9,\. ]*")
 
+                # Walk each data row (skipping the header) and normalize its
+                # identity/description/cost/value cells, repairing cases where
+                # PyMuPDF's table extractor merged or misplaced a numeric value.
                 for row in grid_data[header_row_idx + 1 :]:
                     cost_val = re.sub(r"cost\s*\*\*", "", (row[cost_idx] or ""), flags=re.IGNORECASE).strip()
                     if cost_val == "**":
@@ -525,11 +539,15 @@ def get_grid_page_indices(doc, page_indices: List[int]) -> List[int]:
             continue
         page = doc[i]
 
+        # Fast path: the table finder already extracted usable grid rows.
         rows = extract_grid_rows_from_page(page, i)
         if rows:
             grid_pages.append(i)
             continue
 
+        # Slow path: no rows were extracted, so fall back to purely visual
+        # ruling-line detection on the rendered page image, trying every
+        # plausible rotation since scanned grid pages are often mis-rotated.
         original_rotation = getattr(page, "rotation", 0)
         rotation_candidates = [original_rotation, (original_rotation + 90) % 360, (original_rotation + 270) % 360]
         accepted = False
