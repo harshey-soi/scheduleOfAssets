@@ -28,11 +28,15 @@ from pdf_processor import (
 )
 import tickered
 import grid_extractor
+import pytesseract
 from schedule_parser import parse_schedule_h_page
 from utils import configure_logging, sanitize_filename
 
 logger = logging.getLogger(__name__)
 
+pytesseract.pytesseract.tesseract_cmd = (
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+)
 
 def process_pdf(pdf_path: str, page_indices: list[int] | None = None) -> ExtractionResult:
     """Run the standard parser for a single PDF or an explicit page subset."""
