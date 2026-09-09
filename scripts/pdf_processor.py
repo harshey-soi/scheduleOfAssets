@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import List, Tuple
+
 import numpy as np
 import fitz  # PyMuPDF
 import pytesseract
@@ -216,6 +216,7 @@ def _rotation_readability_score(page: "fitz.Page", rotation: int) -> int:
     score += min(len(lines), 50)
     return score
 
+
 def auto_rotate_image_for_ocr(image):
     """Rotate a rendered page image upright using Tesseract OSD when possible."""
     try:
@@ -248,6 +249,7 @@ def auto_rotate_image_for_ocr(image):
 
     return image
 
+
 def normalize_orientation(page: "fitz.Page") -> None:
     """Rotate landscape pages upright before text extraction begins."""
     try:
@@ -270,10 +272,12 @@ def normalize_orientation(page: "fitz.Page") -> None:
             exc,
         )
 
+
 def is_searchable(page) -> bool:
     """Return True when a page already has enough native text to skip OCR."""
     text = page.get_text("text") or ""
     return len(text.strip()) >= MIN_SEARCHABLE_TEXT_CHARS
+
 
 def extract_words(page):
     """Return word boxes from native text when possible, otherwise from OCR."""
@@ -281,6 +285,7 @@ def extract_words(page):
         return page.get_text("words"), "TEXT"
     else:
         return ocr_words(page), "OCR"
+
 
 def ocr_words(page):
     """OCR a page and return word boxes in the same shape as PyMuPDF output."""
@@ -303,11 +308,10 @@ def ocr_words(page):
     else:
         gray = processed
 
-
     data = pytesseract.image_to_data(
         gray,
         config=OCR_TESSERACT_CONFIG,
-        output_type=pytesseract.Output.DICT
+        output_type=pytesseract.Output.DICT,
     )
 
     words = []
@@ -357,7 +361,7 @@ def _is_tickered_page(text: str) -> bool:
         "investment option",
         "maturity date",
         "interest rate",
-      #  "cost of assets",
+        #  "cost of assets",
         "current value",
     ]
     present = [token for token in required if token in top_text]

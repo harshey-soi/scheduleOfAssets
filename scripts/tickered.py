@@ -276,7 +276,6 @@ def process_tickered_pdf(pdf_path: str) -> ExtractionResult:
 
         page_results: List[SchedulePageResult] = []
         for i in range(len(doc)):
-            page = doc[i]
             rows, source = extract_tickered_rows_from_page(doc, i)
             schedule_rows = []
             for parsed in rows:

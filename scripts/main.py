@@ -24,19 +24,14 @@ from pdf_processor import (
     normalize_orientation,
     open_document,
     is_tickered_document,
-    is_tickered_among_pages,
 )
 import tickered
 import grid_extractor
-import pytesseract
 from schedule_parser import parse_schedule_h_page
 from utils import configure_logging, sanitize_filename
 
 logger = logging.getLogger(__name__)
 
-pytesseract.pytesseract.tesseract_cmd = (
-    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-)
 
 def process_pdf(pdf_path: str, page_indices: list[int] | None = None) -> ExtractionResult:
     """Run the standard parser for a single PDF or an explicit page subset."""
@@ -100,84 +95,90 @@ def process_input_file(pdf_path: str) -> bool:
         # Open the document briefly to decide which pipeline to use.
         doc = open_document(pdf_path)
         try:
-                # First, locate Schedule H pages so we can inspect the specific
-                # pages for tickered layout (rotated/tickered pages are often
-                # missed by a simple document-wide probe).
-                target_pages = find_schedule_h_pages(doc)
-                tickered_pages = get_tickered_page_indices(doc, target_pages) if target_pages else []
-                grid_pages = grid_extractor.get_grid_page_indices(
+            # First, locate Schedule H pages so we can inspect the specific
+            # pages for tickered layout (rotated/tickered pages are often
+            # missed by a simple document-wide probe).
+            target_pages = find_schedule_h_pages(doc)
+            tickered_pages = get_tickered_page_indices(doc, target_pages) if target_pages else []
+            grid_pages = (
+                grid_extractor.get_grid_page_indices(
                     doc,
                     [p for p in target_pages if p not in set(tickered_pages)],
-                ) if target_pages else []
-                normal_candidates = [p for p in target_pages if p not in set(tickered_pages) and p not in set(grid_pages)]
-                normal_pages = [p for p in normal_candidates if is_normal_soa_page(doc[p], top_ratio=0.40)]
+                )
+                if target_pages
+                else []
+            )
+            normal_candidates = [
+                p for p in target_pages if p not in set(tickered_pages) and p not in set(grid_pages)
+            ]
+            normal_pages = [p for p in normal_candidates if is_normal_soa_page(doc[p], top_ratio=0.40)]
 
+            logger.info(
+                "Schedule H page classification | tickered=%s | grid=%s | normal=%s",
+                [p + 1 for p in tickered_pages],
+                [p + 1 for p in grid_pages],
+                [p + 1 for p in normal_pages],
+            )
+
+            if len(normal_pages) != len(normal_candidates):
+                skipped = [p + 1 for p in normal_candidates if p not in set(normal_pages)]
                 logger.info(
-                    "Schedule H page classification | tickered=%s | grid=%s | normal=%s",
-                    [p + 1 for p in tickered_pages],
-                    [p + 1 for p in grid_pages],
-                    [p + 1 for p in normal_pages],
+                    "Normal SOA top-40%% header check skipped page(s): %s",
+                    skipped,
                 )
 
-                if len(normal_pages) != len(normal_candidates):
-                    skipped = [p + 1 for p in normal_candidates if p not in set(normal_pages)]
-                    logger.info(
-                        "Normal SOA top-40%% header check skipped page(s): %s",
-                        skipped,
-                    )
-
-                # We already computed page-level tickered matches above.
-                # Re-running OCR-heavy tickered probes here causes large delays.
-                tickered_among = bool(tickered_pages)
+            # We already computed page-level tickered matches above.
+            # Re-running OCR-heavy tickered probes here causes large delays.
+            tickered_among = bool(tickered_pages)
+            tickered_doc = False
+            try:
+                # Document-level detection can pick up header variants that
+                # aren't present on the exact Schedule H page slice. Use as
+                # a tolerant fallback only when Schedule H pages were not
+                # discovered at all.
+                if not tickered_among and not target_pages:
+                    tickered_doc = is_tickered_document(doc)
+            except Exception:
                 tickered_doc = False
-                try:
-                    # Document-level detection can pick up header variants that
-                    # aren't present on the exact Schedule H page slice. Use as
-                    # a tolerant fallback only when Schedule H pages were not
-                    # discovered at all.
-                    if not tickered_among and not target_pages:
-                        tickered_doc = is_tickered_document(doc)
-                except Exception:
-                    tickered_doc = False
 
-                if tickered_among or tickered_doc:
-                    if tickered_among:
-                        logger.info("Detected tickered layout on Schedule H pages: %s", pdf_path)
-                    else:
-                        logger.info("Detected tickered layout (document-level fallback): %s", pdf_path)
-                    result = tickered.process_tickered_pdf(pdf_path)
-                    # If tickered detection was a false positive (empty result),
-                    # fall back to grid or standard pipeline rather than fail.
-                    if result.is_empty():
-                        logger.warning(
-                            "Tickered pipeline produced no data for %s — falling back to alternative parsers",
-                            pdf_path,
-                        )
-                        # Try grid extractor next
-                        try:
-                            if grid_pages:
-                                logger.info(
-                                    "Fallback: detected visual grid layout on Schedule H pages %s for %s",
-                                    [p + 1 for p in grid_pages],
-                                    pdf_path,
-                                )
-                                result = grid_extractor.process_grid_pdf(pdf_path, page_indices=grid_pages)
-                        except Exception:
-                            logger.debug("Grid detection/extraction fallback failed or raised an error")
-
-                        # If still empty, try the default parser
-                        if result.is_empty():
-                            logger.info("Fallback: running standard Schedule H parser for %s", pdf_path)
-                            result = process_pdf(pdf_path)
-                elif grid_pages:
-                    logger.info(
-                        "Detected visual grid table layout on Schedule H pages %s: %s",
-                        [p + 1 for p in grid_pages],
+            if tickered_among or tickered_doc:
+                if tickered_among:
+                    logger.info("Detected tickered layout on Schedule H pages: %s", pdf_path)
+                else:
+                    logger.info("Detected tickered layout (document-level fallback): %s", pdf_path)
+                result = tickered.process_tickered_pdf(pdf_path)
+                # If tickered detection was a false positive (empty result),
+                # fall back to grid or standard pipeline rather than fail.
+                if result.is_empty():
+                    logger.warning(
+                        "Tickered pipeline produced no data for %s — falling back to alternative parsers",
                         pdf_path,
                     )
-                    result = grid_extractor.process_grid_pdf(pdf_path, page_indices=grid_pages)
-                else:
-                    result = process_pdf(pdf_path, page_indices=normal_pages)
+                    # Try grid extractor next
+                    try:
+                        if grid_pages:
+                            logger.info(
+                                "Fallback: detected visual grid layout on Schedule H pages %s for %s",
+                                [p + 1 for p in grid_pages],
+                                pdf_path,
+                            )
+                            result = grid_extractor.process_grid_pdf(pdf_path, page_indices=grid_pages)
+                    except Exception:
+                        logger.debug("Grid detection/extraction fallback failed or raised an error")
+
+                    # If still empty, try the default parser
+                    if result.is_empty():
+                        logger.info("Fallback: running standard Schedule H parser for %s", pdf_path)
+                        result = process_pdf(pdf_path)
+            elif grid_pages:
+                logger.info(
+                    "Detected visual grid table layout on Schedule H pages %s: %s",
+                    [p + 1 for p in grid_pages],
+                    pdf_path,
+                )
+                result = grid_extractor.process_grid_pdf(pdf_path, page_indices=grid_pages)
+            else:
+                result = process_pdf(pdf_path, page_indices=normal_pages)
         finally:
             doc.close()
 
@@ -235,7 +236,7 @@ def process_input_file(pdf_path: str) -> bool:
                 )
                 # Try clearing read-only bit on Windows as a remediation step
                 try:
-                    os.chmod(pdf_path, 0o666)
+                    os.chmod(pdf_path, 0o600)
                     logger.info("Cleared read-only bit for %s", pdf_path)
                 except Exception as chmod_exc:
                     logger.debug("Failed to chmod %s: %s", pdf_path, chmod_exc)

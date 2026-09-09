@@ -99,8 +99,8 @@ def is_bottom_junk_line(line: List[Word]) -> bool:
 
     # Footnote legends
     if (
-    "party-in-interest" in lower
-    or "party in interest" in lower or "pany-in-intercst" in lower 
+        "party-in-interest" in lower
+        or "party in interest" in lower or "pany-in-intercst" in lower
     ):
         return True
 
@@ -175,7 +175,6 @@ def is_standalone_legend_line(line: List[Word]) -> bool:
     """
     if not line:
         return False
-    text = line_text(line)
     if not _LEADING_MARKER_RE.match(line[0].text.strip()):
         return False
     return not any(is_numeric_value(w.text) for w in line)
@@ -420,7 +419,7 @@ def clean_value_text(start_index: int, end_index: int, words: List[Word]) -> str
     indicates one -- including the OCR quirk where a lone "$" is misread
     as the digit "5".
     """
-    raw = "".join(w.text for w in words[start_index : end_index + 1])
+    raw = "".join(w.text for w in words[start_index: end_index + 1])
     matches = re.findall(r"[\d,]+(?:\.\d+)?", raw)
     value = "".join(matches) if matches else raw
 
@@ -459,7 +458,7 @@ def parse_schedule_h_page(raw_words):
 
     # Original behavior: proceed without logging header context
 
-    body_lines = lines[start_idx + 1 :]
+    body_lines = lines[start_idx + 1:]
 
     # Debug: show body lines before footer trimming when in DEBUG mode
     if logger.isEnabledFor(logging.DEBUG):
@@ -503,7 +502,7 @@ def parse_schedule_h_page(raw_words):
             continue
         s, e = hit
         # average center x of the numeric run
-        coords = [w.xc for w in row_words[s : e + 1]]
+        coords = [w.xc for w in row_words[s: e + 1]]
         if coords:
             numeric_x_candidates.append(statistics.mean(coords))
 
@@ -638,19 +637,36 @@ def parse_schedule_h_page(raw_words):
         if row_words:
             runs = find_numeric_runs(row_words)
             if runs:
+                def is_alpha_word(w):
+                    return bool(re.search(r"[A-Za-z]", w.text))
+
+                def is_run_embedded(r):
+                    s, e = r
+                    if s > 0:
+                        gap_before = row_words[s].x0 - row_words[s - 1].x1
+                        if gap_before < _MIN_MAJOR_GAP_PT and is_alpha_word(row_words[s - 1]):
+                            return True
+                    if e + 1 < len(row_words):
+                        gap_after = row_words[e + 1].x0 - row_words[e].x1
+                        next_word = row_words[e + 1]
+                        if gap_after < _MIN_MAJOR_GAP_PT and is_alpha_word(next_word):
+                            return True
+                        next_text = next_word.text.strip()
+                        if re.fullmatch(r"[A-Za-z]{1,3}\.?", next_text):
+                            return True
+                    return False
+
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug("NUMERIC RUNS FOUND: %s", runs)
                     for r in runs:
                         s, e = r
-                        run_text = " ".join(w.text for w in row_words[s : e + 1])
-                        meanx = statistics.mean([w.xc for w in row_words[s : e + 1]])
+                        run_text = " ".join(w.text for w in row_words[s: e + 1])
+                        meanx = statistics.mean([w.xc for w in row_words[s: e + 1]])
                         gap_before = None
                         if s > 0:
                             gap_before = row_words[s].x0 - row_words[s - 1].x1
-                        has_comma = any(
-                            ("," in w.text) for w in row_words[s : e + 1]
-                        )
-                        has_dollar = any(w.text.strip().startswith("$") for w in row_words[s : e + 1])
+                        has_comma = any(("," in w.text) for w in row_words[s: e + 1])
+                        has_dollar = any(w.text.strip().startswith("$") for w in row_words[s: e + 1])
                         in_column = (
                             numeric_x_median is not None
                             and abs(meanx - numeric_x_median) <= _NUMERIC_COLUMN_TOLERANCE_PT
@@ -660,7 +676,8 @@ def parse_schedule_h_page(raw_words):
                         except Exception:
                             embedded_flag = None
                         logger.debug(
-                            "CANDIDATE %s | text='%s' | meanx=%.1f | gap_before=%s | in_column=%s | comma=%s | dollar=%s | embedded=%s",
+                            "CANDIDATE %s | text='%s' | meanx=%.1f | gap_before=%s | "
+                            "in_column=%s | comma=%s | dollar=%s | embedded=%s",
                             r,
                             run_text,
                             meanx,
@@ -672,17 +689,19 @@ def parse_schedule_h_page(raw_words):
                         )
                 # Pick the run whose right edge is farthest to the right
                 # (more robust than mean x when widths differ).
+
                 def run_right_x(r):
                     s, e = r
-                    return max(w.x1 for w in row_words[s : e + 1])
+                    return max(w.x1 for w in row_words[s: e + 1])
                 # Mixed-priority selection:
                 # 1) Runs containing a comma or a leading '$' (likely monetary)
                 # 2) Runs in the page-level numeric column (near median)
                 # 3) Runs separated by a major gap from preceding text
                 # 4) Fallback to the rightmost run
+
                 def run_has_comma_or_dollar(r):
                     s, e = r
-                    for w in row_words[s : e + 1]:
+                    for w in row_words[s: e + 1]:
                         t = w.text.strip()
                         if "," in t or t.startswith("$"):
                             return True
@@ -696,8 +715,9 @@ def parse_schedule_h_page(raw_words):
                     runs_pref = []
                     for r in runs_comma:
                         s, e = r
-                        meanx = statistics.mean([w.xc for w in row_words[s : e + 1]])
-                        in_column = numeric_x_median is not None and abs(meanx - numeric_x_median) <= _NUMERIC_COLUMN_TOLERANCE_PT
+                        meanx = statistics.mean([w.xc for w in row_words[s: e + 1]])
+                        in_column = numeric_x_median is not None and abs(
+                            meanx - numeric_x_median) <= _NUMERIC_COLUMN_TOLERANCE_PT
                         gap_before = row_words[s].x0 - row_words[s - 1].x1 if s > 0 else float('inf')
                         separated = gap_before >= _MIN_MAJOR_GAP_PT
                         if in_column or separated:
@@ -712,7 +732,7 @@ def parse_schedule_h_page(raw_words):
                     runs_in_column = []
                     for r in runs:
                         s, e = r
-                        coords = [w.xc for w in row_words[s : e + 1]]
+                        coords = [w.xc for w in row_words[s: e + 1]]
                         if coords and abs(statistics.mean(coords) - numeric_x_median) <= _NUMERIC_COLUMN_TOLERANCE_PT:
                             runs_in_column.append(r)
                     if runs_in_column:
@@ -727,7 +747,7 @@ def parse_schedule_h_page(raw_words):
                             # this prevents left-of-column runs (like '500' in
                             # '500 Index Fund') from being treated as separated
                             # numeric columns.
-                            meanx = statistics.mean([w.xc for w in row_words[s : e + 1]])
+                            meanx = statistics.mean([w.xc for w in row_words[s: e + 1]])
                             if numeric_x_median is not None and abs(meanx - numeric_x_median) > relax_tolerance:
                                 continue
                             if gap_before >= _MIN_MAJOR_GAP_PT:
@@ -745,7 +765,7 @@ def parse_schedule_h_page(raw_words):
                         s, e = r
                         if s > 0:
                             gap_before = row_words[s].x0 - row_words[s - 1].x1
-                            meanx = statistics.mean([w.xc for w in row_words[s : e + 1]])
+                            meanx = statistics.mean([w.xc for w in row_words[s: e + 1]])
                             if numeric_x_median is not None and abs(meanx - numeric_x_median) > relax_tolerance:
                                 # skip separated runs that are far left of the
                                 # numeric column median (likely part of identity)
@@ -767,32 +787,6 @@ def parse_schedule_h_page(raw_words):
                 # monetary column. If the chosen run appears embedded and
                 # there is an alternative run that is not embedded, prefer
                 # that alternative.
-                def is_alpha_word(w):
-                    return bool(re.search(r"[A-Za-z]", w.text))
-
-                def is_run_embedded(r):
-                    s, e = r
-                    # gap to previous word
-                    if s > 0:
-                        gap_before = row_words[s].x0 - row_words[s - 1].x1
-                        if gap_before < _MIN_MAJOR_GAP_PT and is_alpha_word(row_words[s - 1]):
-                            return True
-                    # gap to next word
-                    if e + 1 < len(row_words):
-                        gap_after = row_words[e + 1].x0 - row_words[e].x1
-                        # Short alphabetic suffixes like 'TD' commonly follow
-                        # fund-year tokens (e.g. '2060 TD') and indicate the
-                        # numeric token is part of the identity even if the
-                        # spacing is large. Treat short alpha-only tokens
-                        # (1-3 letters) after the run as embedded context.
-                        next_word = row_words[e + 1]
-                        if (gap_after < _MIN_MAJOR_GAP_PT and is_alpha_word(next_word)):
-                            return True
-                        next_text = next_word.text.strip()
-                        if re.fullmatch(r"[A-Za-z]{1,3}\.?", next_text):
-                            return True
-                    return False
-
                 if best is not None and is_run_embedded(best):
                     # find an alternative non-embedded run among the previously
                     # considered candidate sets in priority order
@@ -841,7 +835,7 @@ def parse_schedule_h_page(raw_words):
         # numeric-only line (e.g. '41,219') can be used as the real value.
         if value_hit is not None:
             s_val, e_val = value_hit
-            run_words = row_words[s_val : e_val + 1]
+            run_words = row_words[s_val: e_val + 1]
             run_text = "".join(w.text for w in run_words)
             digits = re.sub(r"\D", "", run_text)
             has_comma_or_dollar = any(("," in w.text or w.text.strip().startswith("$")) for w in run_words)
@@ -896,7 +890,7 @@ def parse_schedule_h_page(raw_words):
         if value_hit is not None:
             try:
                 s_val, e_val = value_hit
-                run_words = row_words[s_val : e_val + 1]
+                run_words = row_words[s_val: e_val + 1]
                 run_text = "".join(w.text for w in run_words)
                 digits = re.sub(r"\D", "", run_text)
                 has_comma_or_dollar = any(("," in w.text or w.text.strip().startswith("$")) for w in run_words)
@@ -914,7 +908,7 @@ def parse_schedule_h_page(raw_words):
                             if next_hit is not None:
                                 ns, ne = next_hit
                                 try:
-                                    meanx_next = statistics.mean([w.xc for w in next_row[ns:ne+1]])
+                                    meanx_next = statistics.mean([w.xc for w in next_row[ns:ne + 1]])
                                 except Exception:
                                     meanx_next = None
                                 # vertical proximity: next row should be close
@@ -924,10 +918,15 @@ def parse_schedule_h_page(raw_words):
                                 except Exception:
                                     y_gap = None
                                 close_vertically = (y_gap is None) or (y_gap <= ROW_Y_TOLERANCE * 2)
-                                in_numeric_column = meanx_next is not None and abs(meanx_next - numeric_x_median) <= _NUMERIC_COLUMN_TOLERANCE_PT
+                                in_numeric_column = (
+                                    meanx_next is not None
+                                    and abs(meanx_next - numeric_x_median)
+                                    <= _NUMERIC_COLUMN_TOLERANCE_PT
+                                )
                                 if in_numeric_column and close_vertically:
                                     logger.info(
-                                        "PREFER NEXT ROW VALUE -> rejecting short run '%s' in favor of next numeric-only row: %s",
+                                        "PREFER NEXT ROW VALUE -> rejecting short run '%s' in favor "
+                                        "of next numeric-only row: %s",
                                         run_text,
                                         line_text(next_row),
                                     )
@@ -977,7 +976,7 @@ def parse_schedule_h_page(raw_words):
             if value_hit is not None:
                 try:
                     s_val, e_val = value_hit
-                    run_left = min(w.x0 for w in row_words[s_val : e_val + 1])
+                    run_left = min(w.x0 for w in row_words[s_val: e_val + 1])
                     cutoff = run_left - (_MIN_MAJOR_GAP_PT / 2.0)
                     trimmed = [w for w in row_words if w.x1 < cutoff]
                     if trimmed and len(trimmed) < len(identity_words):
@@ -1111,7 +1110,7 @@ def parse_schedule_h_page(raw_words):
             # Skip Mutual Funds section header
             if identity_text.strip().lower().startswith("mutual funds"):
                 continue
-            
+
             # Participant-loan descriptive lines
             # Skip obvious year-range headers always (e.g. "2019-2020").
             if re.search(r"\d{4}-\d{4}", identity_text):
@@ -1207,13 +1206,16 @@ def parse_schedule_h_page(raw_words):
                 open_row_has_extra_content = False
         else:
 
-            
             # Continuation line of an already-open ro
             if value_hit is not None:
-                
+
                 # Accept any close textual variant of the participant-loans
                 # identity when handling continuation lines.
-                if current_identity and "participant" in current_identity.lower() and "loan" in current_identity.lower():
+                if (
+                    current_identity
+                    and "participant" in current_identity.lower()
+                    and "loan" in current_identity.lower()
+                ):
                     start_idx, end_idx = value_hit
                     value = clean_value_text(start_idx, end_idx, row_words)
 

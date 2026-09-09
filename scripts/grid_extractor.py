@@ -316,7 +316,8 @@ def _extract_grid_rows_current_orientation(page) -> List[List[str]]:
                             i for i, h in enumerate(candidate_header) if "current" in h or "current value" in h
                         ]
                         if not val_candidates:
-                            val_candidates = [i for i, h in enumerate(candidate_header) if "value" in h and i != candidate_desc_idx]
+                            val_candidates = [
+                                i for i, h in enumerate(candidate_header) if "value" in h and i != candidate_desc_idx]
 
                         if val_candidates:
                             candidate_val_idx = val_candidates[-1]
@@ -341,7 +342,13 @@ def _extract_grid_rows_current_orientation(page) -> List[List[str]]:
                     except StopIteration:
                         continue
 
-                if header_row_idx is None or identity_idx is None or desc_idx is None or cost_idx is None or val_idx is None:
+                if (
+                    header_row_idx is None
+                    or identity_idx is None
+                    or desc_idx is None
+                    or cost_idx is None
+                    or val_idx is None
+                ):
                     logger.debug(
                         "Grid extractor: table header rejected; scanned first %d rows, samples=%s",
                         header_scan_limit,
@@ -359,7 +366,8 @@ def _extract_grid_rows_current_orientation(page) -> List[List[str]]:
                     image_grid_ok, image_horiz, image_vert, image_intersections = image_grid_metrics
                     if image_grid_ok:
                         logger.debug(
-                            "Grid extractor: accepting table-like content on page via image grid detector; header=%s image_horiz=%d image_vert=%d image_intersections=%d",
+                            "Grid extractor: accepting table-like content on page via image grid detector; "
+                            "header=%s image_horiz=%d image_vert=%d image_intersections=%d",
                             lower_header,
                             image_horiz,
                             image_vert,
@@ -373,7 +381,9 @@ def _extract_grid_rows_current_orientation(page) -> List[List[str]]:
                         # extract, keep it instead of discarding it as a false negative.
                         if len(grid_data) >= 5:
                             logger.debug(
-                                "Grid extractor: accepting weak visual table on page via table header fallback; header=%s horiz_positions=%d vert_positions=%d rects=%d bbox=%s image_horiz=%d image_vert=%d image_intersections=%d",
+                                "Grid extractor: accepting weak visual table on page via table header fallback; "
+                                "header=%s horiz_positions=%d vert_positions=%d rects=%d bbox=%s "
+                                "image_horiz=%d image_vert=%d image_intersections=%d",
                                 lower_header,
                                 horiz_count,
                                 vert_count,
@@ -385,7 +395,9 @@ def _extract_grid_rows_current_orientation(page) -> List[List[str]]:
                             )
                         else:
                             logger.debug(
-                                "Grid extractor: table-like content on page rejected by visual grid check; header=%s horiz_positions=%d vert_positions=%d rects=%d bbox=%s image_horiz=%d image_vert=%d image_intersections=%d",
+                                "Grid extractor: table-like content on page rejected by visual grid check; "
+                                "header=%s horiz_positions=%d vert_positions=%d rects=%d bbox=%s "
+                                "image_horiz=%d image_vert=%d image_intersections=%d",
                                 lower_header,
                                 horiz_count,
                                 vert_count,
@@ -404,7 +416,7 @@ def _extract_grid_rows_current_orientation(page) -> List[List[str]]:
                 # Walk each data row (skipping the header) and normalize its
                 # identity/description/cost/value cells, repairing cases where
                 # PyMuPDF's table extractor merged or misplaced a numeric value.
-                for row in grid_data[header_row_idx + 1 :]:
+                for row in grid_data[header_row_idx + 1:]:
                     cost_val = re.sub(r"cost\s*\*\*", "", (row[cost_idx] or ""), flags=re.IGNORECASE).strip()
                     if cost_val == "**":
                         cost_val = ""
@@ -416,14 +428,18 @@ def _extract_grid_rows_current_orientation(page) -> List[List[str]]:
                     # If the description cell itself contains a trailing numeric value
                     # (common when the extractor merges adjacent cells), split it out.
                     try:
-                        m = re.search(r"^(.*?)[\s\u00A0]*([\(\$]?\d[0-9,\.\s\)\-:]*)$", desc_val.strip())
+                        m = re.search(
+                            r"^(.*?)[\s\u00A0]*([\(\$]?\d[0-9,\.\s\)\-:]*)$",
+                            desc_val.strip(),
+                        )
                         if m:
                             possible_desc = m.group(1).strip()
                             possible_value = m.group(2).strip().strip(',:;')
                             # Only treat as a split if the trailing part looks numeric
                             if possible_value and numeric_re.search(possible_value):
                                 logger.debug(
-                                    "Grid extractor: splitting trailing value from description for identity=%r -> desc=%r value=%r",
+                                    "Grid extractor: splitting trailing value from description "
+                                    "for identity=%r -> desc=%r value=%r",
                                     identity_val,
                                     possible_desc,
                                     possible_value,
@@ -437,7 +453,11 @@ def _extract_grid_rows_current_orientation(page) -> List[List[str]]:
 
                     # If the extracted value looks wrong (empty or duplicates the description),
                     # attempt to find a numeric-looking token in the remaining cells as the value.
-                    if (not value_val or value_val.strip() == desc_val.strip() or not numeric_re.search(value_val)):
+                    if (
+                        not value_val
+                        or value_val.strip() == desc_val.strip()
+                        or not numeric_re.search(value_val)
+                    ):
                         found = None
                         # Search all cells (except identity/description/cost) for numeric-like content
                         for j in range(len(row)):
@@ -500,13 +520,17 @@ def _extract_grid_rows_current_orientation(page) -> List[List[str]]:
                         if not found:
                             try:
                                 logger.warning(
-                                    "Grid extractor: unable to find numeric value for row on page (identity=%r). header=%s row=%s",
+                                    "Grid extractor: unable to find numeric value for row on page "
+                                    "(identity=%r). header=%s row=%s",
                                     identity_val,
                                     lower_header,
                                     [str(c or "") for c in row],
                                 )
                             except Exception:
-                                logger.warning("Grid extractor: unable to find numeric value for row; failed to log details")
+                                logger.warning(
+                                    "Grid extractor: unable to find numeric value for row; "
+                                    "failed to log details"
+                                )
 
                         if found:
                             logger.debug(
@@ -549,7 +573,11 @@ def get_grid_page_indices(doc, page_indices: List[int]) -> List[int]:
         # ruling-line detection on the rendered page image, trying every
         # plausible rotation since scanned grid pages are often mis-rotated.
         original_rotation = getattr(page, "rotation", 0)
-        rotation_candidates = [original_rotation, (original_rotation + 90) % 360, (original_rotation + 270) % 360]
+        rotation_candidates = [
+            original_rotation,
+            (original_rotation + 90) % 360,
+            (original_rotation + 270) % 360,
+        ]
         accepted = False
         for rotation in rotation_candidates:
             try:
@@ -557,10 +585,13 @@ def get_grid_page_indices(doc, page_indices: List[int]) -> List[int]:
             except Exception:
                 pass
 
-            image_grid_ok, image_horiz, image_vert, image_intersections = _get_image_grid_structure_metrics(page)
+            image_grid_ok, image_horiz, image_vert, image_intersections = (
+                _get_image_grid_structure_metrics(page)
+            )
             if image_grid_ok:
                 logger.info(
-                    "Grid classifier: page %d accepted via image grid detector at rotation %d (horiz=%d vert=%d intersections=%d)",
+                    "Grid classifier: page %d accepted via image grid detector at rotation %d "
+                    "(horiz=%d vert=%d intersections=%d)",
                     i + 1,
                     rotation,
                     image_horiz,
@@ -654,9 +685,19 @@ def process_grid_pdf(pdf_path: str, page_indices: Optional[List[int]] = None) ->
             schedule_rows: List[ScheduleRow] = []
             for r in rows:
                 identity, desc, cost, value = (r + [""] * 4)[:4]
-                schedule_rows.append(ScheduleRow(identity=identity or "", description=desc or "", cost=cost or None, current_value=value or ""))
+                schedule_rows.append(
+                    ScheduleRow(
+                        identity=identity or "",
+                        description=desc or "",
+                        cost=cost or None,
+                        current_value=value or ""))
 
-            page_result = SchedulePageResult(page_number=i + 1, rows=schedule_rows, has_cost_column=any(r.cost for r in schedule_rows), source="GRID")
+            page_result = SchedulePageResult(
+                page_number=i + 1,
+                rows=schedule_rows,
+                has_cost_column=any(
+                    r.cost for r in schedule_rows),
+                source="GRID")
             page_results.append(page_result)
 
         return ExtractionResult(plan_name=plan_name, pages=page_results)

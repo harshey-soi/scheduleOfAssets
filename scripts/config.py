@@ -77,7 +77,12 @@ except Exception:
     _which = None
 
 if TESSERACT_CMD:
-    print(f"[config] TESSERACT_CMD={TESSERACT_CMD!r}, exists={os.path.exists(TESSERACT_CMD)}, shutil.which('tesseract')={_which!r}")
+    print(
+        "[config] "
+        f"TESSERACT_CMD={TESSERACT_CMD!r}, "
+        f"exists={os.path.exists(TESSERACT_CMD)}, "
+        f"shutil.which('tesseract')={_which!r}"
+    )
 else:
     print(f"[config] TESSERACT_CMD not set, shutil.which('tesseract')={_which!r}")
 
