@@ -15,6 +15,7 @@ from typing import List
 import pytesseract
 
 from pdf_processor import render_page_to_image, open_document
+from ocr_preprocessing import deskew_image
 from utils import is_numeric_value
 from models import ExtractionResult, SchedulePageResult, ScheduleRow
 
@@ -231,6 +232,7 @@ def extract_tickered_rows_from_page(doc, page_index):
 
     try:
         image = render_page_to_image(page, zoom=300 / 72)
+        image = deskew_image(image)
         attempts = [
             ("original", image),
             ("rotated_90", image.rotate(90, expand=True)),

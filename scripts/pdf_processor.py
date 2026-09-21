@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 
 import numpy as np
 import fitz  # PyMuPDF
@@ -29,7 +30,7 @@ from config import (
     SCHEDULE_H_HEADING_RE,
     VALUE_HEADER_RE,
 )
-from ocr_preprocessing import preprocess_for_ocr
+from ocr_preprocessing import deskew_image, preprocess_for_ocr
 from utils import sanitize_filename
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,40 @@ def extract_plan_name(doc: "fitz.Document") -> str:
     return "Unknown Plan Name"
 
 
+def _normalize_detection_text(text: str) -> str:
+    """Flatten OCR quirks that stop heading regexes from matching."""
+    if not text:
+        return ""
+    # Tesseract emits ligatures (e.g. "ﬁ") that break plain-ASCII patterns.
+    cleaned = unicodedata.normalize("NFKD", text)
+    return re.sub(r"\s+", " ", cleaned)
+
+
+def _looks_like_schedule_h(text: str, page_index: int) -> bool:
+    """Return True when a page's text carries a Schedule H / SOA heading."""
+    text = _normalize_detection_text(text)
+    if not text:
+        return False
+
+    if SCHEDULE_H_HEADING_RE.search(text):
+        return True
+
+    # Safe fallback for filings whose heading only says "Schedule of Assets".
+    top_text = " ".join(text.splitlines()[:40])
+    has_short_heading = bool(SCHEDULE_OF_ASSETS_FALLBACK_RE.search(top_text))
+    has_identity_header = bool(IDENTITY_HEADER_RE.search(top_text)) or ("issuer" in top_text.lower())
+    has_description_header = bool(DESCRIPTION_HEADER_RE.search(top_text))
+    has_value_header = bool(VALUE_HEADER_RE.search(top_text))
+    if has_short_heading and has_identity_header and has_description_header and has_value_header:
+        logger.info(
+            "Schedule H fallback detection accepted page %d via 'Schedule of Assets' heading + column headers",
+            page_index + 1,
+        )
+        return True
+
+    return False
+
+
 def find_schedule_h_pages(doc):
     """Return page indices that look like Schedule H or Schedule of Assets pages."""
     pages = []
@@ -124,27 +159,27 @@ def find_schedule_h_pages(doc):
         normalize_orientation(page)
 
         text = page.get_text("text") or ""
+        scanned = len(text.strip()) < MIN_SEARCHABLE_TEXT_CHARS
 
-        if len(text.strip()) < MIN_SEARCHABLE_TEXT_CHARS:
+        if scanned:
             words = ocr_words(page)
             text = " ".join([w[4] for w in words])
 
-        if SCHEDULE_H_HEADING_RE.search(text):
+        if _looks_like_schedule_h(text, i):
             pages.append(i)
             continue
 
-        # Safe fallback for filings whose heading only says "Schedule of Assets".
-        top_text = " ".join(text.splitlines()[:40])
-        has_short_heading = bool(SCHEDULE_OF_ASSETS_FALLBACK_RE.search(top_text))
-        has_identity_header = bool(IDENTITY_HEADER_RE.search(top_text)) or ("issuer" in top_text.lower())
-        has_description_header = bool(DESCRIPTION_HEADER_RE.search(top_text))
-        has_value_header = bool(VALUE_HEADER_RE.search(top_text))
-        if has_short_heading and has_identity_header and has_description_header and has_value_header:
-            logger.info(
-                "Schedule H fallback detection accepted page %d via 'Schedule of Assets' heading + column headers",
-                i + 1,
-            )
-            pages.append(i)
+        # A single-orientation OCR pass can read the heading sideways on
+        # landscape or tilted scans, so retry with the rotation-sweeping probe
+        # before giving up on the page.
+        if scanned:
+            retry_text = _page_text_or_quick_ocr(doc, i)
+            if retry_text and _looks_like_schedule_h(retry_text, i):
+                logger.info(
+                    "Schedule H detected on page %d only after rotation retry.",
+                    i + 1,
+                )
+                pages.append(i)
 
     return pages
 
@@ -299,6 +334,8 @@ def ocr_words(page):
     image = Image.fromarray(img)
 
     image = auto_rotate_image_for_ocr(image)
+
+    image = deskew_image(image)
 
     image = preprocess_for_ocr(image)
 

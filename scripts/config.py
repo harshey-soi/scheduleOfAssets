@@ -30,6 +30,13 @@ OCR_ZOOM = 300 / 72         # thorough pass, used to actually *extract* words
 
 OCR_TESSERACT_CONFIG = r"--oem 3 --psm 6 -c preserve_interword_spaces=1"
 
+# Deskew: some scanned pages are fed through the scanner slightly tilted, which
+# smears table rows across OCR line boundaries. Correction is skipped below the
+# minimum angle so upright scans stay untouched, and above the maximum angle
+# (that is page rotation, which normalize_orientation already handles).
+DESKEW_MIN_ANGLE_DEG = 0.3
+DESKEW_MAX_ANGLE_DEG = 6.0
+
 # Optional: allow users to specify the full tesseract binary path via
 # several possible environment variable names (some teams use
 # nonstandard names like `tesseract_prefix`). Accept either a full

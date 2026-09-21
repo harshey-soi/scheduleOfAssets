@@ -40,7 +40,7 @@ def process_pdf(pdf_path: str, page_indices: list[int] | None = None) -> Extract
         plan_name = extract_plan_name(doc)
         logger.info("Plan name: %s", plan_name)
 
-        target_pages = page_indices if page_indices is not None else find_schedule_h_pages(doc)
+        target_pages = page_indices if page_indices else find_schedule_h_pages(doc)
         if not target_pages:
             raise ValueError("No Schedule H pages were found in this PDF.")
         logger.info("Schedule H found on page(s): %s", [p + 1 for p in target_pages])
@@ -112,6 +112,16 @@ def process_input_file(pdf_path: str) -> bool:
                 p for p in target_pages if p not in set(tickered_pages) and p not in set(grid_pages)
             ]
             normal_pages = [p for p in normal_candidates if is_normal_soa_page(doc[p], top_ratio=0.40)]
+
+            # On scanned pages OCR often mangles the column headers, so the
+            # top-region check can reject every candidate. Keep the pages that
+            # already matched a Schedule H heading rather than failing outright.
+            if not normal_pages and normal_candidates:
+                logger.info(
+                    "Top-40%% header check rejected every candidate; falling back to heading matches: %s",
+                    [p + 1 for p in normal_candidates],
+                )
+                normal_pages = list(normal_candidates)
 
             logger.info(
                 "Schedule H page classification | tickered=%s | grid=%s | normal=%s",
