@@ -456,6 +456,27 @@ def parse_schedule_h_page(raw_words):
     if start_idx is None:
         return [], False
 
+    # Some Schedule H variants include both "Number of Shares" and
+    # "Current Value" numeric columns. For those pages, the current-value
+    # amount is the second-to-last numeric run on each data row.
+    # The column headings are printed across several lines; "Number of
+    # shares" can appear after the first line that triggered header detection.
+    header_scan_end = min(len(lines), start_idx + 25)
+    header_text = " ".join(line_text(line).lower() for line in lines[:header_scan_end])
+    header_text = re.sub(r"\s+", " ", header_text).strip()
+    # OCR line grouping can interleave the two adjacent headers as
+    # "Current Number of ... value shares", so requiring the exact phrase
+    # "number of shares" would miss this valid layout.
+    use_second_last_value = (
+        bool(re.search(r"\bnumber\b", header_text))
+        and bool(re.search(r"\bshares\b", header_text))
+    )
+    logger.debug(
+        "Current-value column rule: second_last=%s header=%r",
+        use_second_last_value,
+        header_text,
+    )
+
     # Original behavior: proceed without logging header context
 
     body_lines = lines[start_idx + 1:]
@@ -637,6 +658,12 @@ def parse_schedule_h_page(raw_words):
         if row_words:
             runs = find_numeric_runs(row_words)
             if runs:
+                selection_runs = (
+                    runs[:-1]
+                    if use_second_last_value and len(runs) >= 2
+                    else runs
+                )
+
                 def is_alpha_word(w):
                     return bool(re.search(r"[A-Za-z]", w.text))
 
@@ -707,7 +734,7 @@ def parse_schedule_h_page(raw_words):
                             return True
                     return False
 
-                runs_comma = [r for r in runs if run_has_comma_or_dollar(r)]
+                runs_comma = [r for r in selection_runs if run_has_comma_or_dollar(r)]
 
                 chosen = None
                 # Prefer comma/$ runs that are also in the column or separated
@@ -730,7 +757,7 @@ def parse_schedule_h_page(raw_words):
                 # If none chosen yet, prefer runs in numeric column
                 if chosen is None and numeric_x_median is not None:
                     runs_in_column = []
-                    for r in runs:
+                    for r in selection_runs:
                         s, e = r
                         coords = [w.xc for w in row_words[s: e + 1]]
                         if coords and abs(statistics.mean(coords) - numeric_x_median) <= _NUMERIC_COLUMN_TOLERANCE_PT:
@@ -761,7 +788,7 @@ def parse_schedule_h_page(raw_words):
                 if chosen is None:
                     runs_separated = []
                     relax_tolerance = _NUMERIC_COLUMN_TOLERANCE_PT * 5
-                    for r in runs:
+                    for r in selection_runs:
                         s, e = r
                         if s > 0:
                             gap_before = row_words[s].x0 - row_words[s - 1].x1
@@ -775,7 +802,7 @@ def parse_schedule_h_page(raw_words):
                     if runs_separated:
                         chosen = max(runs_separated, key=run_right_x)
                     else:
-                        chosen = max(runs, key=run_right_x)
+                        chosen = max(selection_runs, key=run_right_x)
 
                 best = chosen
 
@@ -795,7 +822,7 @@ def parse_schedule_h_page(raw_words):
                         runs_comma if 'runs_comma' in locals() else [],
                         (runs_in_column if 'runs_in_column' in locals() else []),
                         (runs_separated if 'runs_separated' in locals() else []),
-                        runs,
+                        selection_runs,
                     ]
                     for clist in candidate_lists:
                         for r in sorted(clist, key=run_right_x, reverse=True):

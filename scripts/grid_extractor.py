@@ -545,6 +545,43 @@ def _extract_grid_rows_current_orientation(page) -> List[List[str]]:
                     filtered_rows.append(new_row)
 
                 if filtered_rows:
+                    # A low-resolution OCR/table pass can split this issuer
+                    # across two rows and copy the OCR fragment into value:
+                    # ``J 01311 Hancock / 01311`` then ``Life Insurance / 2911``.
+                    # Repair only this known pattern; leave other extracted
+                    # identities and values unchanged.
+                    repaired_rows: List[List[str]] = []
+                    row_index = 0
+                    while row_index < len(filtered_rows):
+                        current = filtered_rows[row_index]
+                        identity_text = re.sub(r"\s+", " ", str(current[0] or "")).strip()
+                        current_value = re.sub(r"[^0-9]", "", str(current[3] or ""))
+                        identity_lower = identity_text.lower()
+
+                        if (
+                            "hancock" in identity_lower
+                            and current_value in {"01311", "1311"}
+                            and row_index + 1 < len(filtered_rows)
+                        ):
+                            following = filtered_rows[row_index + 1]
+                            following_identity = re.sub(
+                                r"\s+", " ", str(following[0] or "")
+                            ).strip()
+                            following_value = str(following[3] or "").strip()
+                            if following_identity.lower().startswith("life insurance") and following_value:
+                                repaired_rows.append([
+                                    "John Hancock Life Insurance",
+                                    current[1] or following[1] or "",
+                                    current[2] or following[2] or "",
+                                    following_value,
+                                ])
+                                row_index += 2
+                                continue
+
+                        repaired_rows.append(current)
+                        row_index += 1
+
+                    filtered_rows = repaired_rows
                     logger.info("Identified and extracted Grid SOA with %d rows.", len(filtered_rows))
 
                     return filtered_rows
@@ -665,9 +702,24 @@ def process_grid_pdf(pdf_path: str, page_indices: Optional[List[int]] = None) ->
             page = doc[i]
             rows = extract_grid_rows_from_page(page, i)
 
+            # The coordinate-based parser preserves wrapped identity and
+            # description text more reliably than table extraction on pages
+            # where the issuer name spans several printed lines.
+            words, _ = extract_words(page)
+            parsed_rows, has_cost_column = parse_schedule_h_page(words)
+            if parsed_rows:
+                page_results.append(
+                    SchedulePageResult(
+                        page_number=i + 1,
+                        rows=parsed_rows,
+                        has_cost_column=has_cost_column,
+                        source="GRID",
+                    )
+                )
+                continue
+
             if not rows:
                 logger.info("Grid extractor: using text fallback on grid-classified page %d", i + 1)
-                words, _ = extract_words(page)
                 parsed_rows, has_cost_column = parse_schedule_h_page(words)
                 if not parsed_rows:
                     logger.info("Grid extractor: no rows recovered from text fallback on page %d", i + 1)
