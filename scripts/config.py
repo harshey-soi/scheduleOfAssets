@@ -76,16 +76,6 @@ try:
 except Exception:
     _which = None
 
-if TESSERACT_CMD:
-    print(
-        "[config] "
-        f"TESSERACT_CMD={TESSERACT_CMD!r}, "
-        f"exists={os.path.exists(TESSERACT_CMD)}, "
-        f"shutil.which('tesseract')={_which!r}"
-    )
-else:
-    print(f"[config] TESSERACT_CMD not set, shutil.which('tesseract')={_which!r}")
-
 # A page is considered "not searchable" (i.e. requires OCR) once its native
 # extractable text falls below this many characters.
 MIN_SEARCHABLE_TEXT_CHARS = 40

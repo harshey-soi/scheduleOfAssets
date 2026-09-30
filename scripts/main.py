@@ -28,10 +28,11 @@ from pdf_processor import (
 import tickered
 import grid_extractor
 from schedule_parser import parse_schedule_h_page
-from utils import configure_logging, sanitize_filename
+from utils import begin_file, configure_logging, end_file, sanitize_filename, step
 
 logger = logging.getLogger(__name__)
-
+def step(message: str) -> None:
+    print(message, flush=True)
 
 def process_pdf(pdf_path: str, page_indices: list[int] | None = None) -> ExtractionResult:
     """Run the standard parser for a single PDF or an explicit page subset."""
@@ -90,15 +91,15 @@ def _unique_output_path(directory: str, filename: str) -> str:
 
 def process_input_file(pdf_path: str) -> bool:
     """Process one PDF end to end and write either data or an error workbook."""
+    begin_file(pdf_path)                       
     try:
         logger.info("Processing: %s", pdf_path)
-        # Open the document briefly to decide which pipeline to use.
         doc = open_document(pdf_path)
+        step("File ingested")                  
         try:
-            # First, locate Schedule H pages so we can inspect the specific
-            # pages for tickered layout (rotated/tickered pages are often
-            # missed by a simple document-wide probe).
-            target_pages = find_schedule_h_pages(doc)
+            step("Searching for Schedule H pages")            
+            target_pages = find_schedule_h_pages(doc) 
+    
             tickered_pages = get_tickered_page_indices(doc, target_pages) if target_pages else []
             grid_pages = (
                 grid_extractor.get_grid_page_indices(
@@ -127,6 +128,7 @@ def process_input_file(pdf_path: str) -> bool:
                     skipped,
                 )
 
+            step("Extracting data")
             # We already computed page-level tickered matches above.
             # Re-running OCR-heavy tickered probes here causes large delays.
             tickered_among = bool(tickered_pages)
@@ -194,6 +196,8 @@ def process_input_file(pdf_path: str) -> bool:
 
         write_workbook(result.pages, output_path)
         logger.info("Success -> %s", output_path)
+        step("Transformed into excel")         # <-- NEW
+        end_file(pdf_path, True)
         # Delete the input PDF now that processing succeeded. If deletion
         # fails due to transient locks (Antivirus, Explorer preview), retry
         # a few times with exponential backoff. If still failing, move the
@@ -257,7 +261,7 @@ def process_input_file(pdf_path: str) -> bool:
     except Exception as exc:  # noqa: BLE001 - per-file failure boundary
         import traceback
         tb = traceback.format_exc()
-        logger.error("Failed to process %s: %s", pdf_path, exc)
+        logger.error("Failed to process %s: %s", pdf_path, exc,exc_info=True)
 
         # Instead of moving the PDF to a failed folder, create an Excel
         # workbook with the same base name that contains the exception
@@ -274,6 +278,7 @@ def process_input_file(pdf_path: str) -> bool:
         except Exception as write_exc:
             logger.error("Failed to write error workbook for %s: %s", pdf_path, write_exc)
 
+        end_file(pdf_path, False)
         return False
 
 

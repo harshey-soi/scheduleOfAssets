@@ -4,21 +4,80 @@ Nothing in this module is aware of PDFs, pages, or coordinates -- it only
 operates on plain strings and numbers, which keeps it trivially testable.
 """
 from __future__ import annotations
-
+import os
+import time
 import logging
 import re
 from typing import Iterable, List, Sequence
 
 from config import NUMERIC_VALUE_RE, ROW_PREFIX_RE
 
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 
-def configure_logging(level: int = logging.INFO) -> None:
-    """Configure root logging once, for use by the CLI entry point."""
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-        datefmt="%H:%M:%S",
-    )
+def get_log_path() -> str:
+    """One log file per day: logs/log_YYYY-MM-DD.log"""
+    return os.path.join(LOG_DIR, f"log_{time.strftime('%Y-%m-%d')}.log")
+
+_FORMATTER = logging.Formatter(
+    "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+    datefmt="%H:%M:%S",
+)
+
+
+class _BufferHandler(logging.Handler):
+    """Holds log records in memory for the file currently being processed."""
+
+    def __init__(self):
+        super().__init__(level=logging.DEBUG)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+_buffer = _BufferHandler()
+_short_lines: list = []
+
+
+def configure_logging(level: int = logging.DEBUG) -> None:
+    """Nothing is printed by logging. Records are buffered per file."""
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(level)
+    root.addHandler(_buffer)
+    # Keep noisy third-party libraries out of the detailed log
+    logging.getLogger("PIL").setLevel(logging.WARNING)
+    logging.getLogger("matplotlib").setLevel(logging.WARNING)
+
+
+def step(message: str) -> None:
+    """Print a progress line to the terminal and remember it for the log file."""
+    print(message, flush=True)
+    _short_lines.append(f"{time.strftime('%H:%M:%S')} | {message}")
+
+
+def begin_file(pdf_path: str) -> None:
+    """Reset buffers at the start of each PDF."""
+    _buffer.records.clear()
+    _short_lines.clear()
+
+
+def end_file(pdf_path: str, success: bool) -> None:
+    """Append this PDF's entry to today's log file. Short on success, detailed on failure."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    log_path = get_log_path()
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    status = "SUCCESS" if success else "FAILED"
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(f"\n===== {stamp} | {status} | {pdf_path} =====\n")
+        for line in _short_lines:
+            f.write(line + "\n")
+        if not success:
+            f.write("--- detailed log ---\n")
+            for record in _buffer.records:
+                f.write(_FORMATTER.format(record) + "\n")
+    if not success:
+        print("Error in processing file. Please check the log book: " + log_path, flush=True)
 
 
 def sanitize_filename(name: str) -> str:
@@ -26,7 +85,6 @@ def sanitize_filename(name: str) -> str:
     cleaned = re.sub(r'[\\/*?:"<>|]', "", name or "").strip()
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned or "Unknown Plan Name"
-
 
 def normalize_number_spacing(text: str) -> str:
     """Collapse stray whitespace introduced around thousands separators by
