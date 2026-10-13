@@ -705,7 +705,7 @@ def process_grid_pdf(pdf_path: str, page_indices: Optional[List[int]] = None) ->
             # The coordinate-based parser preserves wrapped identity and
             # description text more reliably than table extraction on pages
             # where the issuer name spans several printed lines.
-            words, _ = extract_words(page)
+            words, _, is_skewed = extract_words(page)
             parsed_rows, has_cost_column = parse_schedule_h_page(words)
             if parsed_rows:
                 page_results.append(
@@ -714,6 +714,7 @@ def process_grid_pdf(pdf_path: str, page_indices: Optional[List[int]] = None) ->
                         rows=parsed_rows,
                         has_cost_column=has_cost_column,
                         source="GRID",
+                        is_skewed=is_skewed,
                     )
                 )
                 continue
@@ -730,6 +731,7 @@ def process_grid_pdf(pdf_path: str, page_indices: Optional[List[int]] = None) ->
                     rows=parsed_rows,
                     has_cost_column=has_cost_column,
                     source="GRID",
+                    is_skewed=is_skewed,
                 )
                 page_results.append(page_result)
                 continue
@@ -749,7 +751,8 @@ def process_grid_pdf(pdf_path: str, page_indices: Optional[List[int]] = None) ->
                 rows=schedule_rows,
                 has_cost_column=any(
                     r.cost for r in schedule_rows),
-                source="GRID")
+                source="GRID",
+                is_skewed=is_skewed)
             page_results.append(page_result)
 
         return ExtractionResult(plan_name=plan_name, pages=page_results)

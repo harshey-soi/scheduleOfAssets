@@ -93,19 +93,25 @@ def deskew_image(image: Image.Image) -> Image.Image:
 
     Pages that are already level are returned unchanged.
     """
+    return deskew_image_with_angle(image)[0]
+
+
+def deskew_image_with_angle(image: Image.Image) -> tuple[Image.Image, float]:
+    """Straighten an image and return its measured pre-correction angle."""
     try:
         angle = estimate_skew_angle(image)
     except Exception as exc:
         logger.debug("Skew estimation failed: %s", exc)
-        return image
+        return image, 0.0
 
     if abs(angle) < DESKEW_MIN_ANGLE_DEG or abs(angle) > DESKEW_MAX_ANGLE_DEG:
-        return image
+        return image, angle
 
     logger.info("Detected slanted page (%.2f deg). Straightening before OCR.", angle)
     # `expand` keeps the corners of the rotated page inside the canvas, and the
     # white fill matches the scanned background.
-    return image.rotate(angle, resample=Image.BICUBIC, expand=True, fillcolor="white")
+    corrected = image.rotate(angle, resample=Image.BICUBIC, expand=True, fillcolor="white")
+    return corrected, angle
 
 
 def preprocess_for_ocr(image: Image.Image) -> Image.Image:

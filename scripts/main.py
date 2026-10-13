@@ -49,7 +49,7 @@ def process_pdf(pdf_path: str, page_indices: list[int] | None = None) -> Extract
         for page_index in target_pages:
             page = doc[page_index]
             normalize_orientation(page)
-            words, source = extract_words(page)
+            words, source, is_skewed = extract_words(page)
             rows, has_cost_column = parse_schedule_h_page(words)
 
             page_result = SchedulePageResult(
@@ -57,6 +57,7 @@ def process_pdf(pdf_path: str, page_indices: list[int] | None = None) -> Extract
                 rows=rows,
                 has_cost_column=has_cost_column,
                 source=source,
+                is_skewed=is_skewed,
             )
             layout_desc = (
                 "4-col: Identity/Description/Cost/Current Value"

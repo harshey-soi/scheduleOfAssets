@@ -45,6 +45,7 @@ class SchedulePageResult:
     rows: List[ScheduleRow]
     has_cost_column: bool
     source: str  # "TEXT" or "OCR"
+    is_skewed: bool = False
 
     def is_empty(self) -> bool:
         """Report whether the page contributed any extracted rows."""

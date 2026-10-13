@@ -22,6 +22,7 @@ import config as config_module
 
 from config import (
     DESCRIPTION_HEADER_RE,
+    DESKEW_MIN_ANGLE_DEG,
     IDENTITY_HEADER_RE,
     MIN_SEARCHABLE_TEXT_CHARS,
     OCR_TESSERACT_CONFIG,
@@ -30,7 +31,7 @@ from config import (
     SCHEDULE_H_HEADING_RE,
     VALUE_HEADER_RE,
 )
-from ocr_preprocessing import deskew_image, preprocess_for_ocr
+from ocr_preprocessing import deskew_image_with_angle, preprocess_for_ocr
 from utils import sanitize_filename
 
 logger = logging.getLogger(__name__)
@@ -315,11 +316,11 @@ def is_searchable(page) -> bool:
 
 
 def extract_words(page):
-    """Return word boxes from native text when possible, otherwise from OCR."""
+    """Return word boxes, source, and whether OCR detected page skew."""
     if is_searchable(page):
-        return page.get_text("words"), "TEXT"
-    else:
-        return ocr_words(page), "OCR"
+        return page.get_text("words"), "TEXT", False
+    words, skewed = _ocr_words_with_skew(page)
+    return words, "OCR", skewed
 
 
 def _retry_numeric_text_fragments(image, words):
@@ -389,8 +390,8 @@ def _retry_numeric_text_fragments(image, words):
     return repaired
 
 
-def ocr_words(page):
-    """OCR a page and return word boxes in the same shape as PyMuPDF output."""
+def _ocr_words_with_skew(page):
+    """OCR a page and return word boxes plus its measured skew status."""
     zoom = OCR_ZOOM
     mat = fitz.Matrix(zoom, zoom)
     pix = page.get_pixmap(matrix=mat)
@@ -402,7 +403,7 @@ def ocr_words(page):
 
     image = auto_rotate_image_for_ocr(image)
 
-    image = deskew_image(image)
+    image, skew_angle = deskew_image_with_angle(image)
 
     image = preprocess_for_ocr(image)
 
@@ -431,7 +432,15 @@ def ocr_words(page):
 
         words.append((x, y, x + w, y + h, text))
 
-    return _retry_numeric_text_fragments(image, words)
+    return (
+        _retry_numeric_text_fragments(image, words),
+        abs(skew_angle) >= DESKEW_MIN_ANGLE_DEG,
+    )
+
+
+def ocr_words(page):
+    """OCR a page and return word boxes in the same shape as PyMuPDF output."""
+    return _ocr_words_with_skew(page)[0]
 
 
 def _is_tickered_page(text: str) -> bool:

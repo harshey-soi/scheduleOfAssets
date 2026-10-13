@@ -14,8 +14,9 @@ from typing import List
 
 import pytesseract
 
+from config import DESKEW_MIN_ANGLE_DEG
 from pdf_processor import render_page_to_image, open_document
-from ocr_preprocessing import deskew_image
+from ocr_preprocessing import deskew_image_with_angle
 from utils import is_numeric_value
 from models import ExtractionResult, SchedulePageResult, ScheduleRow
 
@@ -228,11 +229,11 @@ def extract_tickered_rows_from_page(doc, page_index):
 
     searchable_rows = _extract_tickered_rows_from_text(page_text)
     if searchable_rows:
-        return searchable_rows, "TICKERED_TEXT"
+        return searchable_rows, "TICKERED_TEXT", False
 
     try:
         image = render_page_to_image(page, zoom=300 / 72)
-        image = deskew_image(image)
+        image, skew_angle = deskew_image_with_angle(image)
         attempts = [
             ("original", image),
             ("rotated_90", image.rotate(90, expand=True)),
@@ -253,10 +254,10 @@ def extract_tickered_rows_from_page(doc, page_index):
 
         if best_rows and best_label != "original":
             logger.info("Used %s orientation for tickered extraction on page %d.", best_label, page_index + 1)
-        return best_rows, "TICKERED_OCR"
+        return best_rows, "TICKERED_OCR", abs(skew_angle) >= DESKEW_MIN_ANGLE_DEG
     except Exception as error:
         logger.warning("Tickered OCR failed on page %d: %s", page_index + 1, error)
-        return [], "TICKERED_OCR"
+        return [], "TICKERED_OCR", False
 
 
 def process_tickered_pdf(pdf_path: str) -> ExtractionResult:
@@ -278,7 +279,7 @@ def process_tickered_pdf(pdf_path: str) -> ExtractionResult:
 
         page_results: List[SchedulePageResult] = []
         for i in range(len(doc)):
-            rows, source = extract_tickered_rows_from_page(doc, i)
+            rows, source, is_skewed = extract_tickered_rows_from_page(doc, i)
             schedule_rows = []
             for parsed in rows:
                 investment, maturity_date, interest_rate, cost, value = parsed
@@ -302,6 +303,7 @@ def process_tickered_pdf(pdf_path: str) -> ExtractionResult:
                 rows=schedule_rows,
                 has_cost_column=any(r.cost for r in schedule_rows),
                 source=source,
+                is_skewed=is_skewed,
             )
             page_results.append(page_result)
 

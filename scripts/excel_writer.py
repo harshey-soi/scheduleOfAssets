@@ -19,6 +19,9 @@ _HEADER_FONT = Font(bold=True, color="FFFFFF", size=11)
 _CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 _LEFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
 _RIGHT = Alignment(horizontal="right", vertical="center", wrap_text=True)
+_NOTICE_FILL = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+_NOTICE_FONT = Font(bold=True, color="7F6000", size=10)
+_NOTICE_ALIGNMENT = Alignment(horizontal="left", vertical="center", wrap_text=True)
 _BORDER = Border(
     left=Side(style="thin"),
     right=Side(style="thin"),
@@ -30,6 +33,13 @@ _THREE_COL_HEADERS = ["Identity", "Description", "Current Value"]
 _FOUR_COL_HEADERS = ["Identity", "Description", "Cost", "Current Value"]
 _THREE_COL_WIDTHS = [32, 55, 20]
 _FOUR_COL_WIDTHS = [30, 45, 16, 20]
+_SKEW_NOTICE = (
+    "Special-Case File Disclaimer: Due to document quality and page alignment challenges, "
+    "certain extracted data may require manual validation. While every effort has been "
+    "made to ensure accurate extraction, minor discrepancies in text recognition, field "
+    "placement, or Participant Loan information may occur. We recommend reviewing the "
+    "extracted output before final use."
+)
 
 
 def _write_page_sheet(worksheet: Worksheet, page: SchedulePageResult) -> None:
@@ -42,15 +52,26 @@ def _write_page_sheet(worksheet: Worksheet, page: SchedulePageResult) -> None:
         headers = [_THREE_COL_HEADERS[0].replace("Identity", identity_label)] + _THREE_COL_HEADERS[1:]
     widths = _FOUR_COL_WIDTHS if page.has_cost_column else _THREE_COL_WIDTHS
     numeric_column_indices = {len(headers) - 1, len(headers)} if page.has_cost_column else {len(headers)}
+    header_row = 1
+
+    if page.is_skewed:
+        worksheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
+        notice_cell = worksheet.cell(row=1, column=1, value=_SKEW_NOTICE)
+        notice_cell.fill = _NOTICE_FILL
+        notice_cell.font = _NOTICE_FONT
+        notice_cell.alignment = _NOTICE_ALIGNMENT
+        notice_cell.border = _BORDER
+        worksheet.row_dimensions[1].height = 72
+        header_row = 2
 
     for col_idx, header in enumerate(headers, start=1):
-        cell = worksheet.cell(row=1, column=col_idx, value=header)
+        cell = worksheet.cell(row=header_row, column=col_idx, value=header)
         cell.fill = _HEADER_FILL
         cell.font = _HEADER_FONT
         cell.alignment = _CENTER
         cell.border = _BORDER
 
-    for row_idx, row in enumerate(page.rows, start=2):
+    for row_idx, row in enumerate(page.rows, start=header_row + 1):
         for col_idx, value in enumerate(row.to_list(include_cost=page.has_cost_column), start=1):
             cell = worksheet.cell(row=row_idx, column=col_idx, value=value)
             cell.border = _BORDER
