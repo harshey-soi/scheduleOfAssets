@@ -322,6 +322,73 @@ def extract_words(page):
         return ocr_words(page), "OCR"
 
 
+def _retry_numeric_text_fragments(image, words):
+    repaired = list(words)
+    candidates = []
+    for index, word in enumerate(words):
+        if index == 0 or not re.fullmatch(r"\d{3,}", word[4]):
+            continue
+        previous = words[index - 1]
+        height = max(word[3] - word[1], previous[3] - previous[1])
+        if (
+            re.fullmatch(r"[A-Za-z]", previous[4])
+            and abs(word[1] - previous[1]) < height / 2
+            and 0 <= word[0] - previous[2] < height / 5
+        ):
+            candidates.append(index)
+
+    for index in reversed(candidates):
+        start = index - 1
+        end = index + 1
+        height = max(words[index][3] - words[index][1], 1)
+        while end < len(words):
+            following = words[end]
+            if (
+                not re.fullmatch(r"[A-Za-z]+", following[4])
+                or abs(following[1] - words[index][1]) >= height / 2
+                or following[0] - words[end - 1][2] > height
+            ):
+                break
+            end += 1
+        original = words[start:end]
+        padding = max(4, int(height / 3))
+        left = max(0, min(word[0] for word in original) - padding)
+        top = max(0, min(word[1] for word in original) - padding)
+        right = min(image.width, max(word[2] for word in original) + padding)
+        bottom = min(image.height, max(word[3] for word in original) + padding)
+        retry = pytesseract.image_to_data(
+            image.crop((left, top, right, bottom)),
+            config="--oem 3 --psm 7",
+            output_type=pytesseract.Output.DICT,
+        )
+        retry_words = []
+        for retry_index, text in enumerate(retry["text"]):
+            text = text.strip()
+            if not text:
+                continue
+            x0 = left + retry["left"][retry_index]
+            y0 = top + retry["top"][retry_index]
+            x1 = x0 + retry["width"][retry_index]
+            y1 = y0 + retry["height"][retry_index]
+            if retry_words and re.fullmatch(r"[A-Za-z]", retry_words[-1][4]):
+                previous = retry_words[-1]
+                if re.fullmatch(r"[A-Za-z]+", text) and x0 - previous[2] < height / 5:
+                    retry_words[-1] = (
+                        previous[0], min(previous[1], y0), x1,
+                        max(previous[3], y1), previous[4] + text,
+                    )
+                    continue
+            retry_words.append((x0, y0, x1, y1, text))
+        retry_text = "".join(word[4] for word in retry_words).lower()
+        if (
+            retry_words
+            and all(re.fullmatch(r"[A-Za-z]+", word[4]) for word in retry_words)
+            and all(word[4].lower() in retry_text for word in original if word[4].isalpha())
+        ):
+            repaired[start:end] = retry_words
+    return repaired
+
+
 def ocr_words(page):
     """OCR a page and return word boxes in the same shape as PyMuPDF output."""
     zoom = OCR_ZOOM
@@ -364,7 +431,7 @@ def ocr_words(page):
 
         words.append((x, y, x + w, y + h, text))
 
-    return words
+    return _retry_numeric_text_fragments(image, words)
 
 
 def _is_tickered_page(text: str) -> bool:

@@ -55,6 +55,9 @@ _GAP_MULTIPLIER = 3.0
 # Leading per-row markers to strip before any gap analysis, e.g. "*",
 # "**", "***", or a dagger symbol, with an optional trailing period.
 _LEADING_MARKER_RE = re.compile(r"^[\*\u2020]{1,3}\.?$")
+_PARTICIPANT_LOAN_RE = re.compile(
+    r"\b(?:participant|panicipant)s?\s+loans?\b", re.IGNORECASE
+)
 
 # A genuine "Total"/summary row (e.g. "Total assets held for investment
 # purposes", "Total investments") is structurally always the LAST such
@@ -133,7 +136,15 @@ def group_lines(words: List[Word]) -> List[List[Word]]:
     if not words:
         return []
     ys = [w.yc for w in words]
-    groups = cluster_by_position(ys, ROW_Y_TOLERANCE)
+    text_heights = [
+        word.y1 - word.y0 for word in words
+        if re.search(r"[A-Za-z0-9]", word.text) and word.y1 > word.y0
+    ]
+    tolerance = max(
+        ROW_Y_TOLERANCE,
+        statistics.median(text_heights) * 0.75 if text_heights else ROW_Y_TOLERANCE,
+    )
+    groups = cluster_by_position(ys, tolerance)
 
     lines = []
     for g in groups:
@@ -419,11 +430,21 @@ def clean_value_text(start_index: int, end_index: int, words: List[Word]) -> str
     indicates one -- including the OCR quirk where a lone "$" is misread
     as the digit "5".
     """
-    raw = "".join(w.text for w in words[start_index: end_index + 1])
+    value_words = words[start_index: end_index + 1]
+    ocr_dollar_prefix = (
+        len(value_words) > 1
+        and value_words[0].text.strip() == "5"
+        and any("," in word.text for word in value_words[1:])
+    )
+    if ocr_dollar_prefix:
+        value_words = value_words[1:]
+    raw = "".join(w.text for w in value_words)
     matches = re.findall(r"[\d,]+(?:\.\d+)?", raw)
     value = "".join(matches) if matches else raw
 
-    if start_index > 0:
+    if ocr_dollar_prefix:
+        value = "$ " + value
+    elif start_index > 0:
         prev_text = words[start_index - 1].text.strip()
         if prev_text in ("$", "5"):
             value = "$ " + value
@@ -434,6 +455,68 @@ def clean_value_text(start_index: int, end_index: int, words: List[Word]) -> str
 # =========================================================
 # MAIN PARSER
 # =========================================================
+
+
+def _parse_wrapped_issuer_rows(lines):
+    for start_index, line in enumerate(lines):
+        if not line or not _LEADING_MARKER_RE.fullmatch(line[0].text.strip()):
+            continue
+        row_words = strip_leading_markers(line)
+        split_index = find_identity_split_index(row_words)
+        if not 0 < split_index < len(row_words):
+            continue
+        issuer_words = row_words[:split_index]
+        heading_words = row_words[split_index:]
+        if find_last_numeric_run(row_words) is not None or not line_text(heading_words).endswith(":"):
+            continue
+        boundary = (issuer_words[-1].x1 + heading_words[0].x0) / 2
+        if start_index + 1 >= len(lines):
+            continue
+        following = strip_leading_markers(lines[start_index + 1])
+        if not (
+            any(word.x1 < boundary for word in following)
+            and find_last_numeric_run([word for word in following if word.x0 >= boundary]) is not None
+        ):
+            continue
+
+        issuer_parts = [line_text(issuer_words)]
+        rows = [ScheduleRow("", line_text(heading_words), "", "")]
+        collecting_issuer = True
+        pending_description = []
+        for body_line in lines[start_index + 1:]:
+            if is_bottom_junk_line(body_line):
+                continue
+            body_words = strip_leading_markers(body_line)
+            left_words = [word for word in body_words if word.x1 < boundary]
+            if left_words:
+                if not collecting_issuer:
+                    return None
+                issuer_parts.append(line_text(left_words))
+            else:
+                collecting_issuer = False
+            investment_words = [word for word in body_words if word.x0 >= boundary]
+            if not investment_words:
+                continue
+            value_hit = find_last_numeric_run(investment_words)
+            if value_hit is None:
+                pending_description.append(line_text(investment_words))
+                continue
+            description_words = investment_words[:value_hit[0]]
+            if description_words and description_words[-1].text.strip() == "$":
+                description_words = description_words[:-1]
+            pending_description.append(line_text(description_words))
+            rows.append(ScheduleRow(
+                "", join_text(pending_description), "",
+                clean_value_text(*value_hit, investment_words),
+            ))
+            pending_description = []
+        if len(issuer_parts) < 2 or len(rows) < 2:
+            return None
+        issuer = join_text(issuer_parts)
+        for row in rows:
+            row.identity = issuer
+        return rows
+    return None
 
 
 def parse_schedule_h_page(raw_words):
@@ -480,6 +563,30 @@ def parse_schedule_h_page(raw_words):
     # Original behavior: proceed without logging header context
 
     body_lines = lines[start_idx + 1:]
+    first_marked_row = next(
+        (
+            idx
+            for idx, line in enumerate(body_lines[:12])
+            if line
+            and _LEADING_MARKER_RE.match(line[0].text.strip())
+            and re.search(r"[A-Za-z]", line_text(line))
+            and not re.search(r"party[\s-]?in[\s-]?interest", line_text(line), re.IGNORECASE)
+        ),
+        None,
+    )
+    if first_marked_row:
+        header_terms = (
+            "identity of", "issuer", "borrower", "lessor", "similar party",
+            "description", "investment", "maturity", "interest rate",
+            "collateral", "par", "current value", "cost", "(a)", "(b)",
+            "(c)", "(d)", "(e)",
+        )
+        leading_lines = body_lines[:first_marked_row]
+        if all(
+            any(term in line_text(line).lower() for term in header_terms)
+            for line in leading_lines
+        ):
+            body_lines = body_lines[first_marked_row:]
 
     # Debug: show body lines before footer trimming when in DEBUG mode
     if logger.isEnabledFor(logging.DEBUG):
@@ -506,6 +613,10 @@ def parse_schedule_h_page(raw_words):
             break
 
     body_lines = body_lines[: last_content_idx + 1]
+
+    wrapped_issuer_rows = _parse_wrapped_issuer_rows(body_lines)
+    if wrapped_issuer_rows is not None:
+        return wrapped_issuer_rows, False
 
     # --------------------------------------------------
     # Detect approximate X position of the numeric (right) column
@@ -537,6 +648,20 @@ def parse_schedule_h_page(raw_words):
     # considered to live in the numeric column. Tuned conservatively.
     _NUMERIC_COLUMN_TOLERANCE_PT = 30.0
 
+    def find_current_value_run(row_words: List[Word]) -> Optional[Tuple[int, int]]:
+        runs = find_numeric_runs(row_words)
+        if numeric_x_median is None:
+            return next(
+                (run for run in reversed(runs) if any("," in w.text or "$" in w.text for w in row_words[run[0]:run[1] + 1])),
+                None,
+            )
+        value_column_runs = []
+        for run in runs:
+            mean_x = statistics.mean(w.xc for w in row_words[run[0]:run[1] + 1])
+            if abs(mean_x - numeric_x_median) <= _NUMERIC_COLUMN_TOLERANCE_PT:
+                value_column_runs.append(run)
+        return max(value_column_runs, key=lambda run: row_words[run[1]].x1) if value_column_runs else None
+
     rows: List[ScheduleRow] = []
     current_identity: Optional[str] = None
     row_open = False
@@ -544,10 +669,30 @@ def parse_schedule_h_page(raw_words):
     previous_row_had_value = False
     last_completed_row_index = None
     open_row_has_extra_content = False
+    participant_loan_open = False
+    participant_loan_description: List[str] = []
+
+    def collect_loan_description(row_words, value_hit, has_identity=False):
+        description_words = row_words[:value_hit[0]] if value_hit is not None else row_words
+        description_text = join_text(
+            word.text for word in description_words
+            if word.text.strip().replace("\u2014", "-").replace("\u2013", "-") not in ("$", "-0-")
+            and not _LEADING_MARKER_RE.fullmatch(word.text.strip())
+        )
+        if has_identity:
+            loan_match = _PARTICIPANT_LOAN_RE.search(description_text)
+            if loan_match is not None:
+                description_text = description_text[loan_match.end():].strip()
+        if description_text:
+            participant_loan_description.append(description_text)
 
     for idx, line in enumerate(body_lines):
         text = line_text(line).strip()
         lower = text.lower()
+        has_row_marker = bool(line and _LEADING_MARKER_RE.match(line[0].text.strip()))
+        has_wrapped_value_header = (
+            "interest rate" in lower and "collateral" in lower and "par" in lower
+        )
 
         if len(text) < 5:
             continue
@@ -555,7 +700,7 @@ def parse_schedule_h_page(raw_words):
         # ------------------------------------
         # Skip wrapped header-continuation lines.
         # ------------------------------------
-        if (
+        if not has_row_marker and not has_wrapped_value_header and (
             "fl lessor" in lower
             or "if lessor" in lower
             or "similar party" in lower
@@ -569,7 +714,7 @@ def parse_schedule_h_page(raw_words):
         # ------------------------------------
         # Skip header / column-label text.
         # ------------------------------------
-        if (
+        if not has_row_marker and not has_wrapped_value_header and (
             "identity of issue" in lower
             or "borrower" in lower
             or "investment including" in lower
@@ -600,7 +745,7 @@ def parse_schedule_h_page(raw_words):
         # Plan"), while keeping real rows that merely carry a "*"
         # party-in-interest marker.
         # ------------------------------------
-        if is_standalone_legend_line(line):
+        if is_standalone_legend_line(line) and not _PARTICIPANT_LOAN_RE.search(lower):
             continue
 
         # ------------------------------------
@@ -610,6 +755,89 @@ def parse_schedule_h_page(raw_words):
         row_words = strip_leading_markers(line)
         if not row_words:
             continue
+
+        if has_wrapped_value_header:
+            header_start = next(
+                (
+                    i
+                    for i, word in enumerate(row_words)
+                    if re.fullmatch(
+                        r"(?:description|investment|including|maturity|date|interest|collateral|par)[,:]?",
+                        word.text.strip().lower(),
+                    )
+                ),
+                len(row_words),
+            )
+            header_prefix = row_words[:header_start]
+            header_value_hit = find_last_numeric_run(row_words)
+
+            if header_value_hit is not None:
+                identity = ""
+                if header_prefix:
+                    identity_end = find_identity_split_index(header_prefix)
+                    identity = strip_row_prefix(
+                        join_text(w.text for w in header_prefix[:identity_end])
+                    ).strip()
+
+                if not identity and row_open and current_identity:
+                    identity = current_identity
+
+                if not identity and idx > 0:
+                    previous_words = strip_leading_markers(body_lines[idx - 1])
+                    previous_text = line_text(previous_words).lower()
+                    if (
+                        previous_words
+                        and find_last_numeric_run(previous_words) is None
+                        and not all(term in previous_text for term in ("interest rate", "collateral", "par"))
+                        and not any(
+                            term in previous_text
+                            for term in (
+                                "identity of", "issuer", "borrower", "lessor",
+                                "similar party", "description of investment",
+                                "maturity date", "current value",
+                            )
+                        )
+                    ):
+                        identity_end = find_identity_split_index(previous_words)
+                        identity = strip_row_prefix(
+                            join_text(w.text for w in previous_words[:identity_end])
+                        ).strip()
+
+                value = clean_value_text(*header_value_hit, row_words)
+                if identity:
+                    if (
+                        last_completed_row_index is not None
+                        and rows
+                        and rows[last_completed_row_index].identity == identity
+                        and not rows[last_completed_row_index].current_value
+                    ):
+                        rows[last_completed_row_index].current_value = value
+                    else:
+                        rows.append(
+                            ScheduleRow(
+                                identity=identity,
+                                description="",
+                                cost="",
+                                current_value=value,
+                            )
+                        )
+                        last_completed_row_index = len(rows) - 1
+                    previous_row_had_value = True
+                    current_identity = None
+                    row_open = False
+                    can_merge_continuation = False
+                    open_row_has_extra_content = False
+                else:
+                    rows.append(
+                        ScheduleRow(identity="", description="", cost="", current_value=value)
+                    )
+                    last_completed_row_index = len(rows) - 1
+                    previous_row_had_value = True
+                continue
+
+            row_words = header_prefix
+            if not row_words:
+                continue
 
         compact_text = "".join(w.text for w in row_words)
         compact_text = compact_text.replace(" ", "")
@@ -624,29 +852,61 @@ def parse_schedule_h_page(raw_words):
         # ------------------------------------
         # Normalize common OCR/typography variants for participant loans
         # (e.g. "Participant loans", "Participants Loans", "Participant Loan(s)").
-        if re.search(r"\bparticipant(?:s)?\s+loans?\b", lower):
-            value_hit = find_last_numeric_run(row_words)
+        if _PARTICIPANT_LOAN_RE.search(lower):
             if row_open and current_identity:
                 rows.append(ScheduleRow(identity=current_identity, description="", cost="", current_value=""))
             current_identity = "Participant loans"
+            row_open = True
+            participant_loan_open = True
+            participant_loan_description = []
+            value_hit = find_current_value_run(row_words)
+            collect_loan_description(row_words, value_hit, has_identity=True)
             if value_hit is not None:
-                start_idx, end_idx = value_hit
-                value = clean_value_text(start_idx, end_idx, row_words)
+                value = clean_value_text(*value_hit, row_words)
                 rows.append(
                     ScheduleRow(
                         identity=current_identity,
-                        description="",
+                        description=join_text(participant_loan_description),
                         cost="",
                         current_value=value,
                     )
                 )
+                last_completed_row_index = len(rows) - 1
+                previous_row_had_value = True
                 current_identity = None
                 row_open = False
+                participant_loan_open = False
                 can_merge_continuation = False
                 open_row_has_extra_content = False
-            else:
-                row_open = True
             continue
+
+        if participant_loan_open:
+            if re.match(r"^\s*\*{0,3}\s*total\b", lower):
+                participant_loan_open = False
+                current_identity = None
+                row_open = False
+            else:
+                loan_value_hit = find_current_value_run(row_words)
+                collect_loan_description(row_words, loan_value_hit)
+                if loan_value_hit is None:
+                    continue
+                value = clean_value_text(*loan_value_hit, row_words)
+                rows.append(
+                    ScheduleRow(
+                        identity="Participant loans",
+                        description=join_text(participant_loan_description),
+                        cost="",
+                        current_value=value,
+                    )
+                )
+                last_completed_row_index = len(rows) - 1
+                previous_row_had_value = True
+                current_identity = None
+                row_open = False
+                participant_loan_open = False
+                can_merge_continuation = False
+                open_row_has_extra_content = False
+                continue
 
         value_hit = find_last_numeric_run(row_words)
 
@@ -1149,6 +1409,15 @@ def parse_schedule_h_page(raw_words):
             if "%" in identity_text and value_hit is None:
                 continue
 
+            description_parts = []
+            if value_hit is not None:
+                for word in row_words[split_idx:value_hit[0]]:
+                    if _LEADING_MARKER_RE.fullmatch(word.text.strip()):
+                        break
+                    if word.text.strip() != "$":
+                        description_parts.append(word.text)
+            description_text = join_text(description_parts)
+
             # Heuristic: if the previous visual line (one above in the
             # PDF) looks like a short identity with no numeric value, and
             # this current line contains a value, then the previous line
@@ -1188,10 +1457,11 @@ def parse_schedule_h_page(raw_words):
                             and not rows[last_completed_row_index].current_value
                         ):
                             rows[last_completed_row_index].identity = merged_identity
+                            rows[last_completed_row_index].description = description_text
                             rows[last_completed_row_index].current_value = value
                         else:
                             rows.append(
-                                ScheduleRow(identity=merged_identity, description="", cost="", current_value=value)
+                                ScheduleRow(identity=merged_identity, description=description_text, cost="", current_value=value)
                             )
                             last_completed_row_index = len(rows) - 1
                         previous_row_had_value = True
@@ -1220,7 +1490,7 @@ def parse_schedule_h_page(raw_words):
                 rows.append(
                     ScheduleRow(
                         identity=current_identity,
-                        description="",
+                        description=description_text,
                         cost="",
                         current_value=value,
                     )
