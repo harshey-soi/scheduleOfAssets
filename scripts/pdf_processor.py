@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+import statistics
 import unicodedata
 
 import numpy as np
@@ -32,6 +33,7 @@ from config import (
     VALUE_HEADER_RE,
 )
 from ocr_preprocessing import deskew_image_with_angle, preprocess_for_ocr
+from models import PlanMetadata
 from utils import sanitize_filename
 
 logger = logging.getLogger(__name__)
@@ -113,6 +115,278 @@ def extract_plan_name(doc: "fitz.Document") -> str:
         if line:
             return sanitize_filename(line)
     return "Unknown Plan Name"
+
+
+def _build_visual_text_lines(words) -> list[str]:
+    """Reconstruct visual rows so form labels stay beside their values."""
+    boxes = [word for word in words if len(word) >= 5 and str(word[4]).strip()]
+    if not boxes:
+        return []
+
+    heights = [float(word[3]) - float(word[1]) for word in boxes if word[3] > word[1]]
+    tolerance = max(2.0, statistics.median(heights) * 0.6 if heights else 2.0)
+    grouped_rows: list[list] = []
+    row_centers: list[float] = []
+
+    for word in sorted(boxes, key=lambda item: ((float(item[1]) + float(item[3])) / 2, float(item[0]))):
+        center = (float(word[1]) + float(word[3])) / 2
+        if grouped_rows and abs(center - row_centers[-1]) <= tolerance:
+            grouped_rows[-1].append(word)
+            row_centers[-1] = sum(
+                (float(item[1]) + float(item[3])) / 2 for item in grouped_rows[-1]
+            ) / len(grouped_rows[-1])
+        else:
+            grouped_rows.append([word])
+            row_centers.append(center)
+
+    return [
+        " ".join(str(word[4]).strip() for word in sorted(row, key=lambda item: float(item[0])))
+        for row in grouped_rows
+    ]
+
+
+def _extract_plan_name_from_lines(lines: list[str]) -> str:
+    """Extract a plan name without consuming neighboring form fields."""
+    excluded_phrases = (
+        "name of plan",
+        "plan name",
+        "plan identification",
+        "plan number",
+        "plan year",
+        "employee benefit plan",
+        "annual return",
+        "schedule h",
+        "form 5500",
+    )
+    field_boundary = re.compile(
+        r"^(?:EIN|employer\s+identification|plan\s+identification\s+number|"
+        r"plan\s+number|plan\s+year)\b|^\d{2}-\d{7}\b|^\d{3}$",
+        flags=re.IGNORECASE,
+    )
+
+    def clean_name(parts: list[str]) -> str:
+        value = re.sub(r"\s+", " ", " ".join(parts)).strip(" :#-\t")
+        value = re.sub(r"^.*[.!?]\s+\d+\s+(?=[A-Z])", "", value)
+        uppercase_company = re.search(
+            r"\b([A-Z][A-Z0-9&.,'() -]*\b(?:INC|LLC|CORP|CORPORATION|COMPANY|CO)\.?.*)",
+            value,
+        )
+        if uppercase_company and any(character.islower() for character in value[:uppercase_company.start()]):
+            value = uppercase_company.group(1)
+        value = re.sub(r"\(\s+", "(", value)
+        return re.sub(r"\s+\)", ")", value)
+
+    def is_name_start(line: str) -> bool:
+        if re.search(
+            r"\b(?:inc|llc|corp|corporation|company|co)\.?\b|\b401\s*\(",
+            line,
+            flags=re.IGNORECASE,
+        ):
+            return True
+        letters = [character for character in line if character.isalpha()]
+        words = re.findall(r"[A-Za-z]+", line)
+        return bool(
+            len(words) >= 2
+            and letters
+            and sum(character.isupper() for character in letters) / len(letters) >= 0.8
+        )
+
+    def is_name_continuation(line: str) -> bool:
+        return bool(
+            not re.search(r"\d", line)
+            and re.match(r"^(?:for|of|and|the)\b", line.strip(), flags=re.IGNORECASE)
+            and len(re.findall(r"[A-Za-z]+", line)) >= 3
+        )
+
+    label_pattern = re.compile(r"(?:name\s+of\s+plan|plan\s+name)\b", re.IGNORECASE)
+    for index, line in enumerate(lines):
+        label_match = label_pattern.search(line)
+        if label_match is None:
+            continue
+        parts = [line[label_match.end():].strip(" :#-\t")]
+        following_lines = lines[index + 1:index + 4]
+        for offset, following_line in enumerate(following_lines):
+            if field_boundary.search(following_line.strip()):
+                break
+            parts.append(following_line.strip())
+            candidate = clean_name([part for part in parts if part])
+            if re.search(r"\bplan\b\s*$", candidate, flags=re.IGNORECASE):
+                if offset + 1 < len(following_lines) and is_name_continuation(
+                    following_lines[offset + 1]
+                ):
+                    parts.append(following_lines[offset + 1].strip())
+                    return clean_name([part for part in parts if part])
+                return candidate
+
+    for index, line in enumerate(lines):
+        if field_boundary.search(line.strip()) or not is_name_start(line):
+            continue
+        combined_parts = [line.strip()]
+        following_lines = lines[index + 1:index + 4]
+        for offset, following_line in enumerate(following_lines):
+            if field_boundary.search(following_line.strip()):
+                break
+            combined_parts.append(following_line.strip())
+            candidate = clean_name(combined_parts)
+            has_organization_marker = bool(
+                re.search(
+                    r"\b(?:inc|llc|corp|corporation|company|co)\.?\b|\b401\s*\(",
+                    candidate,
+                    flags=re.IGNORECASE,
+                )
+            )
+            if has_organization_marker and re.search(
+                r"\bplan\b\s*$",
+                candidate,
+                flags=re.IGNORECASE,
+            ):
+                if offset + 1 < len(following_lines) and is_name_continuation(
+                    following_lines[offset + 1]
+                ):
+                    combined_parts.append(following_lines[offset + 1].strip())
+                    return clean_name(combined_parts)
+                return candidate
+
+    for line in lines:
+        lower_line = line.lower()
+        if any(lower_line.strip().startswith(phrase) for phrase in excluded_phrases):
+            continue
+        match = re.search(
+            r"([A-Za-z][A-Za-z0-9&.,'() /-]*?\bplan\b)"
+            r"(?=\s+(?:EIN|employer\s+identification|plan\s+identification\s+number|"
+            r"plan\s+number|plan\s+year|\d{2}-\d{7}|\d{3}\b)|$)",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return clean_name([match.group(1)])
+
+    next_field = (
+        r"(?=\s+(?:EIN|employer\s+identification|plan\s+identification\s+number|"
+        r"plan\s+number|plan\s+year)\b|$)"
+    )
+    for line in lines:
+        match = re.search(
+            rf"(?:name\s+of\s+plan|plan\s+name)[ \t]*[:#-]?[ \t]*(.+?){next_field}",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            value = match.group(1).strip(" :#-\t")
+            if value and not any(phrase in value.lower() for phrase in excluded_phrases):
+                return value
+    return ""
+
+
+def extract_plan_metadata(
+    doc: "fitz.Document",
+    schedule_page_indices: list[int] | None = None,
+) -> PlanMetadata:
+    """Extract standard Form 5500 identifiers from filing and Schedule H pages."""
+    candidate_indices = list(dict.fromkeys([0] + list(schedule_page_indices or [])))
+    texts = []
+    visual_lines = []
+    for page_index in candidate_indices:
+        if page_index < 0 or page_index >= len(doc):
+            continue
+        texts.append(_page_text_or_quick_ocr(doc, page_index))
+        words, _, _ = extract_words(doc[page_index])
+        visual_lines.extend(_build_visual_text_lines(words))
+
+    raw_lines = [
+        re.sub(r"\s+", " ", line).strip()
+        for text in texts
+        for line in text.splitlines()
+        if line.strip()
+    ]
+    visual_lines = [re.sub(r"\s+", " ", line).strip() for line in visual_lines if line.strip()]
+    lines = raw_lines + visual_lines
+    combined_text = "\n".join(lines)
+
+    plan_name = _extract_plan_name_from_lines(lines)
+
+    ein_label = r"(?:employer\s+identification\s+(?:number|no\.?)|\bEIN(?:\s+(?:number|no\.?))?)"
+    ein_match = re.search(
+        rf"{ein_label}[^\d\n]{{0,80}}(\d{{2}}\s*-?\s*\d{{7}})",
+        combined_text,
+        flags=re.IGNORECASE,
+    )
+    if ein_match is None:
+        for index, line in enumerate(lines):
+            if not re.search(ein_label, line, flags=re.IGNORECASE):
+                continue
+            nearby_text = " ".join(lines[index:index + 3])
+            ein_match = re.search(r"\b(\d{2}\s*-?\s*\d{7})\b", nearby_text)
+            if ein_match:
+                break
+    ein = ""
+    if ein_match:
+        ein_digits = re.sub(r"\D", "", ein_match.group(1))
+        ein = f"{ein_digits[:2]}-{ein_digits[2:]}"
+
+    plan_number_label = (
+        r"(?:three-digit\s+plan\s+number|plan\s+number|plan\s+identification\s+number|"
+        r"plan\s+(?:identification\s+)?no\.?|\bPN\b)"
+    )
+    plan_number_match = re.search(
+        rf"{plan_number_label}"
+        r"(?:\s*\(PN\))?[^\d\n]{0,40}(\d{3})\b",
+        combined_text,
+        flags=re.IGNORECASE,
+    )
+    if plan_number_match is None:
+        for index, line in enumerate(lines):
+            if not re.search(plan_number_label, line, flags=re.IGNORECASE):
+                continue
+            nearby_text = " ".join(lines[index:index + 3])
+            plan_number_match = re.search(r"\b(\d{3})\b", nearby_text)
+            if plan_number_match:
+                break
+    plan_number = plan_number_match.group(1) if plan_number_match else ""
+
+    month = (
+        r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    )
+    day_first_date = rf"\d{{1,2}}[ ./-]+{month}[ ,./-]+\d{{2,4}}"
+    month_first_date = rf"{month}[ .-]+\d{{1,2}}(?:st|nd|rd|th)?[,]?[ ]+\d{{2,4}}"
+    numeric_date = r"\d{1,2}[./-]\d{1,2}[./-]\d{2,4}"
+    date_value = rf"(?:{day_first_date}|{month_first_date}|{numeric_date})"
+    range_separator = r"(?:to|through|and\s+ending|ending|[-\u2013\u2014])"
+    flattened_text = re.sub(r"\s+", " ", combined_text)
+    date_range_match = re.search(
+        rf"(?:plan\s+year[^\d]{{0,100}}?)?({date_value})\s*"
+        rf"{range_separator}\s*({date_value})",
+        flattened_text,
+        flags=re.IGNORECASE,
+    )
+    if date_range_match:
+        start_date = re.sub(r"\s+", " ", date_range_match.group(1)).strip()
+        end_date = re.sub(r"\s+", " ", date_range_match.group(2)).strip()
+        plan_year = f"{start_date} to {end_date}"
+    else:
+        plan_date_match = re.search(
+            rf"(?:plan\s+year|(?:for\s+the\s+)?year\s+ended|as\s+of)"
+            rf"[^\n]{{0,80}}?({date_value})",
+            combined_text,
+            flags=re.IGNORECASE,
+        )
+        if plan_date_match:
+            plan_year = re.sub(r"\s+", " ", plan_date_match.group(1)).strip()
+        else:
+            plan_year_match = re.search(
+                r"plan\s+year[^\n]{0,100}?\b((?:19|20)\d{2})\b",
+                combined_text,
+                flags=re.IGNORECASE,
+            )
+            plan_year = plan_year_match.group(1) if plan_year_match else ""
+
+    return PlanMetadata(
+        plan_name=plan_name,
+        ein=ein,
+        plan_number=plan_number,
+        plan_year=plan_year,
+    )
 
 
 def _normalize_detection_text(text: str) -> str:

@@ -1,7 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
+
+
+# =========================================================
+# DOCUMENT METADATA
+# =========================================================
+
+@dataclass
+class PlanMetadata:
+    """Plan identifiers displayed above each worksheet's asset table."""
+
+    plan_name: str = ""
+    ein: str = ""
+    plan_number: str = ""
+    plan_year: str = ""
 
 
 # =========================================================
@@ -46,10 +60,11 @@ class SchedulePageResult:
     has_cost_column: bool
     source: str  # "TEXT" or "OCR"
     is_skewed: bool = False
+    legend: List[str] = field(default_factory=list)
 
     def is_empty(self) -> bool:
-        """Report whether the page contributed any extracted rows."""
-        return len(self.rows) == 0
+        """Report whether the page contributed table rows or legend text."""
+        return len(self.rows) == 0 and len(self.legend) == 0
 
 
 # =========================================================

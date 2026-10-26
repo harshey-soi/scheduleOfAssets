@@ -28,17 +28,12 @@ def _is_footer_line(lower_line):
     footer_keywords = [
         "accompanying report",
         "notes to the financial statements",
-        "indicates a party-in-interest",
-        "assets are participant directed",
         "see independent auditor's report",
         "attachment",
         "attached",
         "supplemental schedule",
         "the accompanying notes",
         "form 5500",
-        "legend",
-        "key:",
-        "notes:",
         "ein #",
         "ein:",
         "employer identification number",
@@ -46,9 +41,20 @@ def _is_footer_line(lower_line):
     return any(keyword in lower_line for keyword in footer_keywords)
 
 
+def _is_legend_start(lower_line):
+    """Return True when a line begins the explanatory legend section."""
+    stripped = lower_line.strip()
+    if "legend" in stripped or stripped.startswith(("key:", "notes:")):
+        return True
+    return stripped.startswith("*") and any(
+        marker in stripped
+        for marker in ("indicates", "party-in-interest", "participant directed")
+    )
+
+
 def _is_non_table_line(lower_line):
     """Return True for lines that mark the end of tickered table content."""
-    if _is_footer_line(lower_line):
+    if _is_footer_line(lower_line) or _is_legend_start(lower_line):
         return True
     if "attachment" in lower_line or "attached" in lower_line:
         return True
@@ -85,6 +91,26 @@ def _split_footer(lines):
             break
         kept.append(line)
     return kept
+
+
+def _extract_legend_lines(lines):
+    """Return legend text without including trailing report boilerplate."""
+    start_idx = next(
+        (index for index, line in enumerate(lines) if _is_legend_start(line.lower())),
+        None,
+    )
+    if start_idx is None:
+        return []
+
+    legend_lines = []
+    for line in lines[start_idx:]:
+        if legend_lines and _is_footer_line(line.lower()):
+            break
+        if re.fullmatch(r"(?:page\s+)?\d+", line.lower()):
+            continue
+        if not legend_lines or line != legend_lines[-1]:
+            legend_lines.append(line)
+    return legend_lines
 
 
 def _extract_trailing_amount_tokens(text, max_count=2):
@@ -152,10 +178,11 @@ def _extract_tickered_row_from_line(line, allow_blank_investment=False):
     return [investment, maturity_date, interest_rate, cost, value]
 
 
-def _extract_tickered_rows_from_text(page_text):
-    """Extract tickered rows from a page's text layer or OCR output."""
-    lines = [line.strip() for line in page_text.splitlines() if line.strip()]
-    lines = _split_footer(lines)
+def _extract_tickered_content_from_text(page_text):
+    """Extract tickered table rows and separate legend text."""
+    all_lines = [line.strip() for line in page_text.splitlines() if line.strip()]
+    legend_lines = _extract_legend_lines(all_lines)
+    lines = _split_footer(all_lines)
 
     start_idx = -1
     for idx, line in enumerate(lines):
@@ -178,7 +205,7 @@ def _extract_tickered_rows_from_text(page_text):
             start_idx = idx + 1
             break
     if start_idx == -1:
-        return []
+        return [], legend_lines
 
     lines = lines[start_idx:]
 
@@ -215,7 +242,13 @@ def _extract_tickered_rows_from_text(page_text):
         if deduped and row == deduped[-1]:
             continue
         deduped.append(row)
-    return deduped
+    return deduped, legend_lines
+
+
+def _extract_tickered_rows_from_text(page_text):
+    """Extract only tickered rows for callers that do not need legend text."""
+    rows, _ = _extract_tickered_content_from_text(page_text)
+    return rows
 
 
 def extract_tickered_rows_from_page(doc, page_index):
@@ -227,9 +260,9 @@ def extract_tickered_rows_from_page(doc, page_index):
     page = doc[page_index]
     page_text = page.get_text("text") or ""
 
-    searchable_rows = _extract_tickered_rows_from_text(page_text)
-    if searchable_rows:
-        return searchable_rows, "TICKERED_TEXT", False
+    searchable_rows, searchable_legend = _extract_tickered_content_from_text(page_text)
+    if searchable_rows or searchable_legend:
+        return searchable_rows, searchable_legend, "TICKERED_TEXT", False
 
     try:
         image = render_page_to_image(page, zoom=300 / 72)
@@ -241,32 +274,42 @@ def extract_tickered_rows_from_page(doc, page_index):
         ]
 
         best_rows = []
+        best_legend = []
         best_label = "original"
         for label, attempt_image in attempts:
             text = pytesseract.image_to_string(
                 attempt_image,
                 config=r'--oem 3 --psm 6 -c preserve_interword_spaces=0',
             )
-            rows = _extract_tickered_rows_from_text(text)
-            if len(rows) > len(best_rows):
+            rows, legend = _extract_tickered_content_from_text(text)
+            score = (len(rows), sum(len(line) for line in legend))
+            best_score = (len(best_rows), sum(len(line) for line in best_legend))
+            if score > best_score:
                 best_rows = rows
+                best_legend = legend
                 best_label = label
 
         if best_rows and best_label != "original":
             logger.info("Used %s orientation for tickered extraction on page %d.", best_label, page_index + 1)
-        return best_rows, "TICKERED_OCR", abs(skew_angle) >= DESKEW_MIN_ANGLE_DEG
+        return best_rows, best_legend, "TICKERED_OCR", abs(skew_angle) >= DESKEW_MIN_ANGLE_DEG
     except Exception as error:
         logger.warning("Tickered OCR failed on page %d: %s", page_index + 1, error)
-        return [], "TICKERED_OCR", False
+        return [], [], "TICKERED_OCR", False
 
 
-def process_tickered_pdf(pdf_path: str) -> ExtractionResult:
-    """High-level entry point: open PDF, extract tickered rows per page,
+def process_tickered_pdf(
+    pdf_path: str,
+    page_indices: List[int] | None = None,
+) -> ExtractionResult:
+    """High-level entry point: open PDF, extract selected tickered rows per page,
     and return an `ExtractionResult` compatible with the rest of the
     pipeline.
     """
     doc = open_document(pdf_path)
     try:
+        if page_indices is None:
+            page_indices = list(range(len(doc)))
+
         plan_name = "Unknown Plan Name"
         # Try to extract plan name from first non-blank line of page 1
         if doc.page_count > 0:
@@ -278,8 +321,8 @@ def process_tickered_pdf(pdf_path: str) -> ExtractionResult:
                     break
 
         page_results: List[SchedulePageResult] = []
-        for i in range(len(doc)):
-            rows, source, is_skewed = extract_tickered_rows_from_page(doc, i)
+        for i in page_indices:
+            rows, legend, source, is_skewed = extract_tickered_rows_from_page(doc, i)
             schedule_rows = []
             for parsed in rows:
                 investment, maturity_date, interest_rate, cost, value = parsed
@@ -304,6 +347,7 @@ def process_tickered_pdf(pdf_path: str) -> ExtractionResult:
                 has_cost_column=any(r.cost for r in schedule_rows),
                 source=source,
                 is_skewed=is_skewed,
+                legend=legend,
             )
             page_results.append(page_result)
 

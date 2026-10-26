@@ -16,6 +16,7 @@ from config import FAILED_FOLDER, INPUT_FOLDER, OUTPUT_FOLDER
 from excel_writer import write_workbook
 from models import ExtractionResult, SchedulePageResult
 from pdf_processor import (
+    extract_plan_metadata,
     extract_plan_name,
     extract_words,
     find_schedule_h_pages,
@@ -23,7 +24,6 @@ from pdf_processor import (
     is_normal_soa_page,
     normalize_orientation,
     open_document,
-    is_tickered_document,
 )
 import tickered
 import grid_extractor
@@ -100,6 +100,7 @@ def process_input_file(pdf_path: str) -> bool:
             # pages for tickered layout (rotated/tickered pages are often
             # missed by a simple document-wide probe).
             target_pages = find_schedule_h_pages(doc)
+            metadata = extract_plan_metadata(doc, target_pages)
             tickered_pages = get_tickered_page_indices(doc, target_pages) if target_pages else []
             grid_pages = (
                 grid_extractor.get_grid_page_indices(
@@ -112,17 +113,9 @@ def process_input_file(pdf_path: str) -> bool:
             normal_candidates = [
                 p for p in target_pages if p not in set(tickered_pages) and p not in set(grid_pages)
             ]
-            normal_pages = [p for p in normal_candidates if is_normal_soa_page(doc[p], top_ratio=0.40)]
-
-            # On scanned pages OCR often mangles the column headers, so the
-            # top-region check can reject every candidate. Keep the pages that
-            # already matched a Schedule H heading rather than failing outright.
-            if not normal_pages and normal_candidates:
-                logger.info(
-                    "Top-40%% header check rejected every candidate; falling back to heading matches: %s",
-                    [p + 1 for p in normal_candidates],
-                )
-                normal_pages = list(normal_candidates)
+            normal_pages = [
+                p for p in normal_candidates if is_normal_soa_page(doc[p], top_ratio=0.40)
+            ]
 
             logger.info(
                 "Schedule H page classification | tickered=%s | grid=%s | normal=%s",
@@ -131,65 +124,49 @@ def process_input_file(pdf_path: str) -> bool:
                 [p + 1 for p in normal_pages],
             )
 
-            if len(normal_pages) != len(normal_candidates):
-                skipped = [p + 1 for p in normal_candidates if p not in set(normal_pages)]
+            rejected_pages = [p for p in normal_candidates if p not in set(normal_pages)]
+            if rejected_pages:
                 logger.info(
-                    "Normal SOA top-40%% header check skipped page(s): %s",
-                    skipped,
+                    "Excluded page(s) without valid Schedule H table headers: %s",
+                    [p + 1 for p in rejected_pages],
                 )
 
-            # We already computed page-level tickered matches above.
-            # Re-running OCR-heavy tickered probes here causes large delays.
-            tickered_among = bool(tickered_pages)
-            tickered_doc = False
-            try:
-                # Document-level detection can pick up header variants that
-                # aren't present on the exact Schedule H page slice. Use as
-                # a tolerant fallback only when Schedule H pages were not
-                # discovered at all.
-                if not tickered_among and not target_pages:
-                    tickered_doc = is_tickered_document(doc)
-            except Exception:
-                tickered_doc = False
+            extraction_results: List[ExtractionResult] = []
 
-            if tickered_among or tickered_doc:
-                if tickered_among:
-                    logger.info("Detected tickered layout on Schedule H pages: %s", pdf_path)
-                else:
-                    logger.info("Detected tickered layout (document-level fallback): %s", pdf_path)
-                result = tickered.process_tickered_pdf(pdf_path)
-                # If tickered detection was a false positive (empty result),
-                # fall back to grid or standard pipeline rather than fail.
-                if result.is_empty():
-                    logger.warning(
-                        "Tickered pipeline produced no data for %s — falling back to alternative parsers",
-                        pdf_path,
-                    )
-                    # Try grid extractor next
-                    try:
-                        if grid_pages:
-                            logger.info(
-                                "Fallback: detected visual grid layout on Schedule H pages %s for %s",
-                                [p + 1 for p in grid_pages],
-                                pdf_path,
-                            )
-                            result = grid_extractor.process_grid_pdf(pdf_path, page_indices=grid_pages)
-                    except Exception:
-                        logger.debug("Grid detection/extraction fallback failed or raised an error")
+            if tickered_pages:
+                logger.info("Extracting tickered Schedule H pages: %s", [p + 1 for p in tickered_pages])
+                extraction_results.append(
+                    tickered.process_tickered_pdf(pdf_path, page_indices=tickered_pages)
+                )
 
-                    # If still empty, try the default parser
-                    if result.is_empty():
-                        logger.info("Fallback: running standard Schedule H parser for %s", pdf_path)
-                        result = process_pdf(pdf_path)
-            elif grid_pages:
+            if grid_pages:
                 logger.info(
-                    "Detected visual grid table layout on Schedule H pages %s: %s",
+                    "Extracting grid Schedule H pages %s: %s",
                     [p + 1 for p in grid_pages],
                     pdf_path,
                 )
-                result = grid_extractor.process_grid_pdf(pdf_path, page_indices=grid_pages)
-            else:
-                result = process_pdf(pdf_path, page_indices=normal_pages)
+                extraction_results.append(
+                    grid_extractor.process_grid_pdf(pdf_path, page_indices=grid_pages)
+                )
+
+            if normal_pages:
+                logger.info(
+                    "Extracting non-grid Schedule H pages: %s",
+                    [p + 1 for p in normal_pages],
+                )
+                extraction_results.append(process_pdf(pdf_path, page_indices=normal_pages))
+
+            combined_pages = sorted(
+                (
+                    page
+                    for extraction_result in extraction_results
+                    for page in extraction_result.pages
+                    if not page.is_empty()
+                ),
+                key=lambda page: page.page_number,
+            )
+            plan_name = extraction_results[0].plan_name if extraction_results else "Unknown Plan Name"
+            result = ExtractionResult(plan_name=plan_name, pages=combined_pages)
         finally:
             doc.close()
 
@@ -203,7 +180,7 @@ def process_input_file(pdf_path: str) -> bool:
         output_filename = f"{sanitize_filename(input_base)}.xlsx"
         output_path = _unique_output_path(OUTPUT_FOLDER, output_filename)
 
-        write_workbook(result.pages, output_path)
+        write_workbook(result.pages, output_path, metadata=metadata)
         logger.info("Success -> %s", output_path)
         # Delete the input PDF now that processing succeeded. If deletion
         # fails due to transient locks (Antivirus, Explorer preview), retry
