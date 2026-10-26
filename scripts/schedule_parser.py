@@ -539,13 +539,29 @@ def parse_schedule_h_page(raw_words):
     if start_idx is None:
         return [], False
 
+    header_marker_x = {}
+    for header_line in lines[:start_idx + 1]:
+        for word in header_line:
+            marker = word.text.strip().lower()
+            if re.fullmatch(r"\([b-e]\)", marker):
+                header_marker_x[marker] = word.xc
+    description_cost_boundary = None
+    if "(c)" in header_marker_x and "(d)" in header_marker_x:
+        description_cost_boundary = (
+            header_marker_x["(c)"] + header_marker_x["(d)"]
+        ) / 2.0
+
     # Some Schedule H variants include both "Number of Shares" and
     # "Current Value" numeric columns. For those pages, the current-value
     # amount is the second-to-last numeric run on each data row.
     # The column headings are printed across several lines; "Number of
     # shares" can appear after the first line that triggered header detection.
-    header_scan_end = min(len(lines), start_idx + 25)
-    header_text = " ".join(line_text(line).lower() for line in lines[:header_scan_end])
+    header_lines = []
+    for line in lines[start_idx:]:
+        if find_last_numeric_run(strip_leading_markers(line)) is not None:
+            break
+        header_lines.append(line_text(line).lower())
+    header_text = " ".join(header_lines)
     header_text = re.sub(r"\s+", " ", header_text).strip()
     # OCR line grouping can interleave the two adjacent headers as
     # "Current Number of ... value shares", so requiring the exact phrase
@@ -671,9 +687,28 @@ def parse_schedule_h_page(raw_words):
     open_row_has_extra_content = False
     participant_loan_open = False
     participant_loan_description: List[str] = []
+    section_descriptions = {
+        "registered investment company": "",
+        "pooled separate accounts": "Pooled Separate Accounts",
+        "common/collective trust": "Common/Collective Trust",
+        "common collective trust funds": "Common/Collective Trust",
+        "mutual funds": "",
+        "investments": "",
+    }
+    section_identity = {
+        "pooled separate accounts": "principal life insurance company",
+        "common/collective trust": "principal trust company",
+        "common collective trust funds": "principal trust company",
+    }
+    section_description = ""
 
     def collect_loan_description(row_words, value_hit, has_identity=False):
         description_words = row_words[:value_hit[0]] if value_hit is not None else row_words
+        if description_cost_boundary is not None:
+            description_words = [
+                word for word in description_words
+                if word.xc < description_cost_boundary
+            ]
         description_text = join_text(
             word.text for word in description_words
             if word.text.strip().replace("\u2014", "-").replace("\u2013", "-") not in ("$", "-0-")
@@ -728,6 +763,7 @@ def parse_schedule_h_page(raw_words):
             or "(d)" in lower
             or "(e)" in lower
             or lower.startswith("identity of")
+            or lower.strip() == "range of interest rates"
         ):
             continue
 
@@ -754,6 +790,30 @@ def parse_schedule_h_page(raw_words):
         # ------------------------------------
         row_words = strip_leading_markers(line)
         if not row_words:
+            continue
+        if (
+            description_cost_boundary is not None
+            and all(word.xc >= description_cost_boundary for word in row_words)
+            and not any(is_numeric_value(word.text) for word in row_words)
+        ):
+            continue
+
+        section_heading = join_text(
+            word.text
+            for word in row_words
+            if description_cost_boundary is None or word.xc < description_cost_boundary
+        ).lower()
+        if section_heading in section_descriptions and find_last_numeric_run(row_words) is None:
+            section_description = section_descriptions[section_heading]
+            prior_identity = section_identity.get(section_heading)
+            if prior_identity and rows:
+                prior_row = rows[-1]
+                if (
+                    prior_row.identity.lower() == prior_identity
+                    and prior_row.description
+                    and not prior_row.description.lower().startswith(section_description.lower())
+                ):
+                    prior_row.description = join_text((section_description, prior_row.description))
             continue
 
         if has_wrapped_value_header:
@@ -915,6 +975,9 @@ def parse_schedule_h_page(raw_words):
         # that, enumerate all numeric runs on the row and pick the one with
         # the largest average X coordinate. This avoids accidentally picking
         # the left-side 'Cost' number when two numeric columns are present.
+        runs_comma = []
+        runs_in_column = []
+        runs_separated = []
         if row_words:
             runs = find_numeric_runs(row_words)
             if runs:
@@ -939,7 +1002,10 @@ def parse_schedule_h_page(raw_words):
                         if gap_after < _MIN_MAJOR_GAP_PT and is_alpha_word(next_word):
                             return True
                         next_text = next_word.text.strip()
-                        if re.fullmatch(r"[A-Za-z]{1,3}\.?", next_text):
+                        if (
+                            gap_after < _MIN_MAJOR_GAP_PT
+                            and re.fullmatch(r"[A-Za-z]{1,3}\.?", next_text)
+                        ):
                             return True
                     return False
 
@@ -1079,9 +1145,9 @@ def parse_schedule_h_page(raw_words):
                     # considered candidate sets in priority order
                     alt = None
                     candidate_lists = [
-                        runs_comma if 'runs_comma' in locals() else [],
-                        (runs_in_column if 'runs_in_column' in locals() else []),
-                        (runs_separated if 'runs_separated' in locals() else []),
+                        runs_comma,
+                        runs_in_column,
+                        runs_separated,
                         selection_runs,
                     ]
                     for clist in candidate_lists:
@@ -1184,7 +1250,7 @@ def parse_schedule_h_page(raw_words):
                 # Only treat short runs of exactly 4 digits as potential
                 # embedded-year/fund tokens to reject; allow 1-3 digit
                 # numeric values to be considered valid monetary values.
-                if digits and len(digits) >= 3 and not has_comma_or_dollar:
+                if digits and len(digits) == 4 and not has_comma_or_dollar:
                     if idx + 1 < len(body_lines) and numeric_x_median is not None:
                         next_row = strip_leading_markers(body_lines[idx + 1])
                         # Require the next row to be numeric-only and its
@@ -1414,9 +1480,22 @@ def parse_schedule_h_page(raw_words):
                 for word in row_words[split_idx:value_hit[0]]:
                     if _LEADING_MARKER_RE.fullmatch(word.text.strip()):
                         break
+                    if (
+                        description_cost_boundary is not None
+                        and word.xc >= description_cost_boundary
+                    ):
+                        continue
                     if word.text.strip() != "$":
                         description_parts.append(word.text)
             description_text = join_text(description_parts)
+            if section_description:
+                description_text = join_text((section_description, description_text))
+            if re.fullmatch(
+                r"(?:mutual|collective) fund,\s*[\d,]+ units(?:\s+N/A)?",
+                description_text,
+                re.IGNORECASE,
+            ):
+                description_text = ""
 
             # Heuristic: if the previous visual line (one above in the
             # PDF) looks like a short identity with no numeric value, and
@@ -1442,6 +1521,7 @@ def parse_schedule_h_page(raw_words):
                         prev_identity
                         and not prev_has_numeric
                         and len(prev_identity.split()) <= 3
+                        and prev_identity.lower() not in section_descriptions
                         and not re.search(r"[:\-]\s*$", prev_identity)
                     ):
                         merged_identity = (prev_identity + " " + identity_text).strip()

@@ -459,8 +459,9 @@ def _extract_grid_rows_current_orientation(page) -> List[List[str]]:
                         or not numeric_re.search(value_val)
                     ):
                         found = None
-                        # Search all cells (except identity/description/cost) for numeric-like content
-                        for j in range(len(row)):
+                        # Search right-to-left so the far-right amount wins over
+                        # intermediate numeric cells such as unit counts.
+                        for j in range(len(row) - 1, -1, -1):
                             if j in (identity_idx, desc_idx, cost_idx):
                                 continue
                             cell = (row[j] or "").strip()

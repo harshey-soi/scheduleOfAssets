@@ -260,23 +260,14 @@ def auto_rotate_image_for_ocr(image):
         logger.info("OSD OUTPUT:\n%s", osd)
 
         rotate = 0
-
         for line in osd.splitlines():
             if "Rotate:" in line:
                 rotate = int(line.split(":")[1].strip())
                 break
 
-        if rotate != 0:
-            logger.info(
-                "OSD detected rotation=%d. Rotating image.",
-                rotate
-            )
-
-            image = image.rotate(
-                -rotate,
-                expand=True
-            )
-
+        if rotate:
+            logger.info("OSD detected rotation=%d. Rotating image.", rotate)
+            image = image.rotate(-rotate, expand=True)
     except Exception as exc:
         logger.debug(
             "OSD orientation detection failed: %s",
@@ -315,10 +306,54 @@ def is_searchable(page) -> bool:
     return len(text.strip()) >= MIN_SEARCHABLE_TEXT_CHARS
 
 
+def _native_text_rotation_hint(page) -> int | None:
+    """Return the OCR correction angle when most native text runs vertically."""
+    try:
+        vertical_directions = []
+        line_count = 0
+        for block in page.get_text("dict").get("blocks", []):
+            for line in block.get("lines", []):
+                if not any(span.get("text", "").strip() for span in line.get("spans", [])):
+                    continue
+                line_count += 1
+                dx, dy = line.get("dir", (1.0, 0.0))
+                if abs(dy) > abs(dx):
+                    vertical_directions.append(dy)
+
+        if line_count < 5 or len(vertical_directions) / line_count < 0.75:
+            return None
+
+        return 90 if sum(vertical_directions) < 0 else 270
+    except Exception as exc:
+        logger.debug("Native text orientation check failed: %s", exc)
+        return None
+
+
+def _rotate_native_word_boxes(words, page, rotation_hint: int):
+    """Rotate native word coordinates into the page's readable orientation."""
+    width = float(page.rect.width)
+    height = float(page.rect.height)
+    if rotation_hint == 90:
+        return [
+            (height - y1, x0, height - y0, x1, *word)
+            for x0, y0, x1, y1, *word in words
+        ]
+    if rotation_hint == 270:
+        return [
+            (y0, width - x1, y1, width - x0, *word)
+            for x0, y0, x1, y1, *word in words
+        ]
+    return words
+
+
 def extract_words(page):
     """Return word boxes, source, and whether OCR detected page skew."""
     if is_searchable(page):
-        return page.get_text("words"), "TEXT", False
+        words = page.get_text("words")
+        rotation_hint = _native_text_rotation_hint(page)
+        if rotation_hint is not None:
+            words = _rotate_native_word_boxes(words, page, rotation_hint)
+        return words, "TEXT", False
     words, skewed = _ocr_words_with_skew(page)
     return words, "OCR", skewed
 
