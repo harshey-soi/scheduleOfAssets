@@ -34,7 +34,7 @@ _GRID_DIVIDER_BORDER = Border(
     left=Side(style="thin"),
     right=Side(style="thin"),
     top=Side(style="thin"),
-    bottom=Side(style="medium"),
+    bottom=Side(style="thick", color="000000"),
 )
 
 _THREE_COL_HEADERS = ["Identity", "Description", "Current Value"]

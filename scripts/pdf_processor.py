@@ -156,6 +156,16 @@ def _extract_schedule_header_plan_name(lines: list[str]) -> str:
         r"held\s+at\s+end\s+of\s+year)",
         flags=re.IGNORECASE,
     )
+    metadata_field_pattern = re.compile(
+        r"^(?:plan\s+(?:identification\s+)?(?:number|no\.?)|plan\s+year|"
+        r"EIN|employer\s+identification)",
+        flags=re.IGNORECASE,
+    )
+    metadata_suffix_pattern = re.compile(
+        r"\s+(?:plan\s+(?:identification\s+)?(?:number|no\.?)|plan\s+year|"
+        r"EIN|employer\s+identification)\b.*$",
+        flags=re.IGNORECASE,
+    )
 
     for heading_index, line in enumerate(lines):
         if not heading_pattern.search(line):
@@ -164,7 +174,7 @@ def _extract_schedule_header_plan_name(lines: list[str]) -> str:
         preceding_lines = lines[window_start:heading_index]
         for relative_index in range(len(preceding_lines) - 1, -1, -1):
             candidate_line = preceding_lines[relative_index].strip()
-            if generic_line_pattern.search(candidate_line):
+            if generic_line_pattern.search(candidate_line) or metadata_field_pattern.search(candidate_line):
                 continue
             if not re.search(r"\bplan\b", candidate_line, flags=re.IGNORECASE):
                 continue
@@ -184,6 +194,7 @@ def _extract_schedule_header_plan_name(lines: list[str]) -> str:
                     break
 
             plan_name = re.sub(r"\s+", " ", " ".join(name_parts)).strip(" :#-\t")
+            plan_name = metadata_suffix_pattern.sub("", plan_name).strip(" :#-\t")
             plan_name = re.sub(r"\(\s+", "(", plan_name)
             plan_name = re.sub(r"\s+\)", ")", plan_name)
             if plan_name:
@@ -212,6 +223,13 @@ def _extract_plan_name_from_lines(lines: list[str]) -> str:
 
     def clean_name(parts: list[str]) -> str:
         value = re.sub(r"\s+", " ", " ".join(parts)).strip(" :#-\t")
+        value = re.sub(
+            r"\s+(?:plan\s+(?:identification\s+)?(?:number|no\.?)|plan\s+year|"
+            r"EIN|employer\s+identification)\b.*$",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        ).strip(" :#-\t")
         value = re.sub(r"^.*[.!?]\s+\d+\s+(?=[A-Z])", "", value)
         uppercase_company = re.search(
             r"\b([A-Z][A-Z0-9&.,'() -]*\b(?:INC|LLC|CORP|CORPORATION|COMPANY|CO)\.?.*)",

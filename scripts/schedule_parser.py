@@ -690,8 +690,8 @@ def parse_schedule_h_page(raw_words):
     section_descriptions = {
         "registered investment company": "",
         "pooled separate accounts": "Pooled Separate Accounts",
-        "common/collective trust": "Common/Collective Trust",
-        "common collective trust funds": "Common/Collective Trust",
+        "common/collective trust": "",
+        "common collective trust funds": "",
         "mutual funds": "",
         "investments": "",
     }
@@ -805,6 +805,17 @@ def parse_schedule_h_page(raw_words):
         ).lower()
         if section_heading in section_descriptions and find_last_numeric_run(row_words) is None:
             section_description = section_descriptions[section_heading]
+            if section_heading in {"common/collective trust", "common collective trust funds"}:
+                if not rows or rows[-1].identity.lower() != "common/collective trust":
+                    rows.append(
+                        ScheduleRow(
+                            identity="Common/Collective Trust",
+                            description="",
+                            cost="",
+                            current_value="",
+                        )
+                    )
+                continue
             prior_identity = section_identity.get(section_heading)
             if prior_identity and rows:
                 prior_row = rows[-1]
