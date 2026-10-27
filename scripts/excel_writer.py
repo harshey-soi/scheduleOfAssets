@@ -48,6 +48,12 @@ _SKEW_NOTICE = (
     "placement, or Participant Loan information may occur. We recommend reviewing the "
     "extracted output before final use."
 )
+_NON_GRID_NOTICE = (
+    "Note: The extracted data and current values are expected to be accurate. However, due "
+    "to document quality and page alignment variations, minor discrepancies may occasionally "
+    "occur. Please review the output, and if any issues are identified with the current values, "
+    "kindly let us know."
+)
 _LEGEND_TICKER_RE = re.compile(r"\b[A-Z0-9]{5,10}\b")
 
 
@@ -146,6 +152,23 @@ def _write_page_sheet(
         value_cell.border = _BORDER
 
     header_row = 6
+
+    source = (page.source or "").upper()
+    is_non_grid = source != "GRID" and not source.startswith("TICKERED")
+    if is_non_grid and not page.is_skewed:
+        worksheet.merge_cells(
+            start_row=header_row,
+            start_column=1,
+            end_row=header_row,
+            end_column=len(headers),
+        )
+        notice_cell = worksheet.cell(row=header_row, column=1, value=_NON_GRID_NOTICE)
+        notice_cell.fill = _NOTICE_FILL
+        notice_cell.font = _NOTICE_FONT
+        notice_cell.alignment = _NOTICE_ALIGNMENT
+        notice_cell.border = _BORDER
+        worksheet.row_dimensions[header_row].height = 42
+        header_row += 1
 
     if page.is_skewed:
         worksheet.merge_cells(

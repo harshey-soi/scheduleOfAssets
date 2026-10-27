@@ -145,200 +145,153 @@ def _build_visual_text_lines(words) -> list[str]:
     ]
 
 
-def _extract_schedule_header_plan_name(lines: list[str]) -> str:
-    """Extract the plan name printed directly above a Schedule H heading."""
-    heading_pattern = re.compile(
-        r"form\s+5500.*schedule\s+h|schedule\s+of\s+assets",
-        flags=re.IGNORECASE,
-    )
-    generic_line_pattern = re.compile(
-        r"^(?:form\s+5500|schedule\s+h|schedule\s+of\s+assets|"
-        r"held\s+at\s+end\s+of\s+year)",
-        flags=re.IGNORECASE,
-    )
-    metadata_field_pattern = re.compile(
-        r"^(?:plan\s+(?:identification\s+)?(?:number|no\.?)|plan\s+year|"
-        r"EIN|employer\s+identification)",
-        flags=re.IGNORECASE,
-    )
-    metadata_suffix_pattern = re.compile(
-        r"\s+(?:plan\s+(?:identification\s+)?(?:number|no\.?)|plan\s+year|"
-        r"EIN|employer\s+identification)\b.*$",
-        flags=re.IGNORECASE,
-    )
+_PLAN_NAME_LABEL_RE = re.compile(
+    r"(?:name\s+of\s+plan(?!\s+sponsor)|plan\s+name)\b",
+    re.IGNORECASE,
+)
+_PLAN_METADATA_FIELD_RE = re.compile(
+    r"^(?:plan\s+(?:identification\s+)?(?:number|no\.?)|plan\s+year|"
+    r"EIN|employer\s+identification)\b|^\d{2}-\d{7}\b|^\d{3}$",
+    re.IGNORECASE,
+)
+_PLAN_METADATA_SUFFIX_RE = re.compile(
+    r"\s+(?:plan\s+(?:identification\s+)?(?:number|no\.?)|plan\s+year|"
+    r"EIN|employer\s+identification)\b.*$",
+    re.IGNORECASE,
+)
+_SCHEDULE_TABLE_HEADING_RE = re.compile(
+    r"form\s+5500.*schedule\s*h|schedule\s*h(?:\s*,?\s*line\s*4i)?|"
+    r"schedule\s+of\s+assets|assets\s+held\s+at\s+(?:year\s+end|end\s+of\s+year)",
+    re.IGNORECASE,
+)
+_GENERIC_PLAN_HEADER_RE = re.compile(
+    r"^(?:form\s+5500|schedule\s*h|schedule\s+of\s+assets|assets\s+held|"
+    r"held\s+at\s+end|annual\s+return|employee\s+benefit\s+plan)",
+    re.IGNORECASE,
+)
 
-    for heading_index, line in enumerate(lines):
-        if not heading_pattern.search(line):
-            continue
-        window_start = max(0, heading_index - 6)
-        preceding_lines = lines[window_start:heading_index]
-        for relative_index in range(len(preceding_lines) - 1, -1, -1):
-            candidate_line = preceding_lines[relative_index].strip()
-            if generic_line_pattern.search(candidate_line) or metadata_field_pattern.search(candidate_line):
-                continue
-            if not re.search(r"\bplan\b", candidate_line, flags=re.IGNORECASE):
-                continue
 
-            name_parts = [candidate_line]
-            if relative_index > 0 and (
-                candidate_line.startswith(")")
-                or re.match(r"^[A-Za-z]\)", candidate_line)
-                or preceding_lines[relative_index - 1].rstrip().endswith("(")
-            ):
-                name_parts.insert(0, preceding_lines[relative_index - 1].strip())
+def _clean_plan_name(parts: list[str]) -> str:
+    """Normalize a plan-name candidate and remove adjacent metadata fields."""
+    value = re.sub(r"\s+", " ", " ".join(parts)).strip(" :#-\t")
+    value = _PLAN_NAME_LABEL_RE.sub("", value, count=1).strip(" :#-\t")
+    value = _PLAN_METADATA_SUFFIX_RE.sub("", value).strip(" :#-\t")
 
-            for continuation in preceding_lines[relative_index + 1:]:
-                if re.match(r"^(?:for|of|and|the)\b", continuation.strip(), re.IGNORECASE):
-                    name_parts.append(continuation.strip())
-                else:
-                    break
+    sentence_parts = re.split(r"(?<=[.!?])\s+(?:\d+\s+)?(?=[A-Z])", value)
+    if len(sentence_parts) > 1 and re.search(r"\bplan\b", sentence_parts[-1], re.IGNORECASE):
+        value = sentence_parts[-1]
 
-            plan_name = re.sub(r"\s+", " ", " ".join(name_parts)).strip(" :#-\t")
-            plan_name = metadata_suffix_pattern.sub("", plan_name).strip(" :#-\t")
-            plan_name = re.sub(r"\(\s+", "(", plan_name)
-            plan_name = re.sub(r"\s+\)", ")", plan_name)
-            if plan_name:
-                return plan_name
-    return ""
+    value = re.sub(r"\(\s+", "(", value)
+    value = re.sub(r"\s+\)", ")", value)
+    return value.strip(" :#-\t")
+
+
+def _is_valid_plan_name(value: str, require_plan_word: bool = False) -> bool:
+    """Reject metadata, report titles, dates, and other non-name candidates."""
+    if not value or len(value) > 250:
+        return False
+    if _PLAN_METADATA_FIELD_RE.search(value) or _GENERIC_PLAN_HEADER_RE.search(value):
+        return False
+    if require_plan_word and not re.search(r"\bplan\b", value, re.IGNORECASE):
+        return False
+    words = re.findall(r"[A-Za-z]+", value)
+    if len(words) < 2:
+        return False
+    normalized_words = [word.lower() for word in words]
+    if len(words) >= 5 and len(set(normalized_words)) / len(words) < 0.5:
+        return False
+    return True
 
 
 def _extract_plan_name_from_lines(lines: list[str]) -> str:
-    """Extract a plan name without consuming neighboring form fields."""
-    excluded_phrases = (
-        "name of plan",
-        "plan name",
-        "plan identification",
-        "plan number",
-        "plan year",
-        "employee benefit plan",
-        "annual return",
-        "schedule h",
-        "form 5500",
-    )
-    field_boundary = re.compile(
-        r"^(?:EIN|employer\s+identification|plan\s+identification\s+number|"
-        r"plan\s+number|plan\s+year)\b|^\d{2}-\d{7}\b|^\d{3}$",
-        flags=re.IGNORECASE,
-    )
-
-    def clean_name(parts: list[str]) -> str:
-        value = re.sub(r"\s+", " ", " ".join(parts)).strip(" :#-\t")
-        value = re.sub(
-            r"\s+(?:plan\s+(?:identification\s+)?(?:number|no\.?)|plan\s+year|"
-            r"EIN|employer\s+identification)\b.*$",
-            "",
-            value,
-            flags=re.IGNORECASE,
-        ).strip(" :#-\t")
-        value = re.sub(r"^.*[.!?]\s+\d+\s+(?=[A-Z])", "", value)
-        uppercase_company = re.search(
-            r"\b([A-Z][A-Z0-9&.,'() -]*\b(?:INC|LLC|CORP|CORPORATION|COMPANY|CO)\.?.*)",
-            value,
-        )
-        if uppercase_company and any(character.islower() for character in value[:uppercase_company.start()]):
-            value = uppercase_company.group(1)
-        value = re.sub(r"\(\s+", "(", value)
-        return re.sub(r"\s+\)", ")", value)
-
-    def is_name_start(line: str) -> bool:
-        if re.search(
-            r"\b(?:inc|llc|corp|corporation|company|co)\.?\b|\b401\s*\(",
-            line,
-            flags=re.IGNORECASE,
-        ):
-            return True
-        letters = [character for character in line if character.isalpha()]
-        words = re.findall(r"[A-Za-z]+", line)
-        return bool(
-            len(words) >= 2
-            and letters
-            and sum(character.isupper() for character in letters) / len(letters) >= 0.8
-        )
-
-    def is_name_continuation(line: str) -> bool:
-        return bool(
-            not re.search(r"\d", line)
-            and re.match(r"^(?:for|of|and|the)\b", line.strip(), flags=re.IGNORECASE)
-            and len(re.findall(r"[A-Za-z]+", line)) >= 3
-        )
-
-    label_pattern = re.compile(r"(?:name\s+of\s+plan|plan\s+name)\b", re.IGNORECASE)
+    """Extract a plan name from an explicit Name of Plan / Plan Name label."""
     for index, line in enumerate(lines):
-        label_match = label_pattern.search(line)
+        label_match = _PLAN_NAME_LABEL_RE.search(line)
         if label_match is None:
             continue
-        parts = [line[label_match.end():].strip(" :#-\t")]
-        following_lines = lines[index + 1:index + 4]
-        for offset, following_line in enumerate(following_lines):
-            if field_boundary.search(following_line.strip()):
-                break
-            parts.append(following_line.strip())
-            candidate = clean_name([part for part in parts if part])
-            if re.search(r"\bplan\b\s*$", candidate, flags=re.IGNORECASE):
-                if offset + 1 < len(following_lines) and is_name_continuation(
-                    following_lines[offset + 1]
-                ):
-                    parts.append(following_lines[offset + 1].strip())
-                    return clean_name([part for part in parts if part])
-                return candidate
 
-    for index, line in enumerate(lines):
-        if field_boundary.search(line.strip()) or not is_name_start(line):
-            continue
-        combined_parts = [line.strip()]
+        parts = []
+        same_line_value = line[label_match.end():].strip(" :#-\t")
+        if same_line_value:
+            parts.append(same_line_value)
+
         following_lines = lines[index + 1:index + 4]
-        for offset, following_line in enumerate(following_lines):
-            if field_boundary.search(following_line.strip()):
-                break
-            combined_parts.append(following_line.strip())
-            candidate = clean_name(combined_parts)
-            has_organization_marker = bool(
-                re.search(
-                    r"\b(?:inc|llc|corp|corporation|company|co)\.?\b|\b401\s*\(",
-                    candidate,
+        if parts:
+            same_line_candidate = _clean_plan_name(parts)
+            if _is_valid_plan_name(same_line_candidate, require_plan_word=True):
+                if following_lines and re.match(
+                    r"^(?:for|of|and|the)\b",
+                    following_lines[0].strip(),
                     flags=re.IGNORECASE,
-                )
-            )
-            if has_organization_marker and re.search(
-                r"\bplan\b\s*$",
-                candidate,
-                flags=re.IGNORECASE,
-            ):
-                if offset + 1 < len(following_lines) and is_name_continuation(
-                    following_lines[offset + 1]
                 ):
-                    combined_parts.append(following_lines[offset + 1].strip())
-                    return clean_name(combined_parts)
+                    same_line_candidate = _clean_plan_name(
+                        parts + [following_lines[0].strip()]
+                    )
+                return same_line_candidate
+            if not _is_valid_plan_name(same_line_candidate):
+                parts = []
+
+        for offset, following_line in enumerate(following_lines):
+            following_line = following_line.strip()
+            if (
+                _PLAN_METADATA_FIELD_RE.search(following_line)
+                or _SCHEDULE_TABLE_HEADING_RE.search(following_line)
+            ):
+                break
+            parts.append(following_line)
+            candidate = _clean_plan_name([part for part in parts if part])
+            if _is_valid_plan_name(candidate, require_plan_word=True):
+                if offset + 1 < len(following_lines) and re.match(
+                    r"^(?:for|of|and|the)\b",
+                    following_lines[offset + 1].strip(),
+                    flags=re.IGNORECASE,
+                ):
+                    candidate = _clean_plan_name(
+                        parts + [following_lines[offset + 1].strip()]
+                    )
                 return candidate
 
-    for line in lines:
-        lower_line = line.lower()
-        if any(lower_line.strip().startswith(phrase) for phrase in excluded_phrases):
-            continue
-        match = re.search(
-            r"([A-Za-z][A-Za-z0-9&.,'() /-]*?\bplan\b)"
-            r"(?=\s+(?:EIN|employer\s+identification|plan\s+identification\s+number|"
-            r"plan\s+number|plan\s+year|\d{2}-\d{7}|\d{3}\b)|$)",
-            line,
-            flags=re.IGNORECASE,
-        )
-        if match:
-            return clean_name([match.group(1)])
+        candidate = _clean_plan_name([part for part in parts if part])
+        if _is_valid_plan_name(candidate, require_plan_word=True):
+            return candidate
+    return ""
 
-    next_field = (
-        r"(?=\s+(?:EIN|employer\s+identification|plan\s+identification\s+number|"
-        r"plan\s+number|plan\s+year)\b|$)"
-    )
-    for line in lines:
-        match = re.search(
-            rf"(?:name\s+of\s+plan|plan\s+name)[ \t]*[:#-]?[ \t]*(.+?){next_field}",
-            line,
-            flags=re.IGNORECASE,
-        )
-        if match:
-            value = match.group(1).strip(" :#-\t")
-            if value and not any(phrase in value.lower() for phrase in excluded_phrases):
-                return value
+
+def _extract_schedule_header_plan_name(lines: list[str]) -> str:
+    """Extract the nearest valid plan name printed above a Schedule H heading."""
+    for heading_index, line in enumerate(lines):
+        if not _SCHEDULE_TABLE_HEADING_RE.search(line):
+            continue
+
+        preceding_lines = lines[max(0, heading_index - 8):heading_index]
+        for candidate_index in range(len(preceding_lines) - 1, -1, -1):
+            candidate_line = preceding_lines[candidate_index].strip()
+            if not _is_valid_plan_name(candidate_line, require_plan_word=True):
+                continue
+
+            parts = [candidate_line]
+            if candidate_index > 0 and (
+                candidate_line.startswith(")")
+                or re.match(r"^[A-Za-z]\)", candidate_line)
+                or preceding_lines[candidate_index - 1].rstrip().endswith("(")
+            ):
+                parts.insert(0, preceding_lines[candidate_index - 1].strip())
+
+            for continuation in preceding_lines[candidate_index + 1:]:
+                continuation = continuation.strip()
+                if (
+                    _PLAN_METADATA_FIELD_RE.search(continuation)
+                    or _GENERIC_PLAN_HEADER_RE.search(continuation)
+                ):
+                    break
+                if re.match(r"^(?:for|of|and|the)\b", continuation, re.IGNORECASE):
+                    parts.append(continuation)
+                else:
+                    break
+
+            candidate = _clean_plan_name(parts)
+            if _is_valid_plan_name(candidate, require_plan_word=True):
+                return candidate
     return ""
 
 
@@ -367,9 +320,13 @@ def extract_plan_metadata(
     lines = raw_lines + visual_lines
     combined_text = "\n".join(lines)
 
-    plan_name = _extract_schedule_header_plan_name(raw_lines)
+    plan_name = _extract_plan_name_from_lines(raw_lines)
     if not plan_name:
-        plan_name = _extract_plan_name_from_lines(lines)
+        plan_name = _extract_schedule_header_plan_name(raw_lines)
+    if not plan_name:
+        plan_name = _extract_plan_name_from_lines(visual_lines)
+    if not plan_name:
+        plan_name = _extract_schedule_header_plan_name(visual_lines)
 
     ein_label = r"(?:employer\s+identification\s+(?:number|no\.?)|\bEIN(?:\s+(?:number|no\.?))?)"
     ein_match = re.search(
