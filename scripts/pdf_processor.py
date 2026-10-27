@@ -145,6 +145,52 @@ def _build_visual_text_lines(words) -> list[str]:
     ]
 
 
+def _extract_schedule_header_plan_name(lines: list[str]) -> str:
+    """Extract the plan name printed directly above a Schedule H heading."""
+    heading_pattern = re.compile(
+        r"form\s+5500.*schedule\s+h|schedule\s+of\s+assets",
+        flags=re.IGNORECASE,
+    )
+    generic_line_pattern = re.compile(
+        r"^(?:form\s+5500|schedule\s+h|schedule\s+of\s+assets|"
+        r"held\s+at\s+end\s+of\s+year)",
+        flags=re.IGNORECASE,
+    )
+
+    for heading_index, line in enumerate(lines):
+        if not heading_pattern.search(line):
+            continue
+        window_start = max(0, heading_index - 6)
+        preceding_lines = lines[window_start:heading_index]
+        for relative_index in range(len(preceding_lines) - 1, -1, -1):
+            candidate_line = preceding_lines[relative_index].strip()
+            if generic_line_pattern.search(candidate_line):
+                continue
+            if not re.search(r"\bplan\b", candidate_line, flags=re.IGNORECASE):
+                continue
+
+            name_parts = [candidate_line]
+            if relative_index > 0 and (
+                candidate_line.startswith(")")
+                or re.match(r"^[A-Za-z]\)", candidate_line)
+                or preceding_lines[relative_index - 1].rstrip().endswith("(")
+            ):
+                name_parts.insert(0, preceding_lines[relative_index - 1].strip())
+
+            for continuation in preceding_lines[relative_index + 1:]:
+                if re.match(r"^(?:for|of|and|the)\b", continuation.strip(), re.IGNORECASE):
+                    name_parts.append(continuation.strip())
+                else:
+                    break
+
+            plan_name = re.sub(r"\s+", " ", " ".join(name_parts)).strip(" :#-\t")
+            plan_name = re.sub(r"\(\s+", "(", plan_name)
+            plan_name = re.sub(r"\s+\)", ")", plan_name)
+            if plan_name:
+                return plan_name
+    return ""
+
+
 def _extract_plan_name_from_lines(lines: list[str]) -> str:
     """Extract a plan name without consuming neighboring form fields."""
     excluded_phrases = (
@@ -303,7 +349,9 @@ def extract_plan_metadata(
     lines = raw_lines + visual_lines
     combined_text = "\n".join(lines)
 
-    plan_name = _extract_plan_name_from_lines(lines)
+    plan_name = _extract_schedule_header_plan_name(raw_lines)
+    if not plan_name:
+        plan_name = _extract_plan_name_from_lines(lines)
 
     ein_label = r"(?:employer\s+identification\s+(?:number|no\.?)|\bEIN(?:\s+(?:number|no\.?))?)"
     ein_match = re.search(
